@@ -20,7 +20,8 @@ sys.path.insert(0, os.path.join(os.path.expanduser("~"), ".local", "bin"))
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GLib, Gdk, Gio, GObject
+gi.require_version("WebKit", "6.0")
+from gi.repository import Gtk, Adw, GLib, Gdk, Gio, GObject, WebKit
 
 import hidamari_core as H
 
@@ -1052,49 +1053,36 @@ class RipoWallWindow(Adw.ApplicationWindow):
     # =========================================================================
 
     def _refresh_we_status(self):
-        """Actualiza el icono de WE: verde si Steam corre, gris si no."""
+        """Actualiza el icono del Workshop: gris/rojo si Steam no corre."""
         try:
             steam_ok = subprocess.run(
                 ["pgrep", "-x", "steam"], capture_output=True, timeout=3
             ).returncode == 0
-
             if steam_ok:
                 self.we_btn.remove_css_class("destructive-action")
-                self.we_btn.set_tooltip_text("Abrir Wallpaper Engine (Steam Workshop)")
+                self.we_btn.set_tooltip_text("Steam Workshop — Buscar wallpapers")
             else:
                 self.we_btn.add_css_class("destructive-action")
                 self.we_btn.remove_css_class("suggested-action")
-                self.we_btn.set_tooltip_text("Steam no esta corriendo")
+                self.we_btn.set_tooltip_text("Steam no esta corriendo. Inicia Steam para descargar wallpapers.")
         except Exception:
             pass
         return True
 
     def _on_we_launch(self, btn: Gtk.Button):
-        """Abre Wallpaper Engine via Steam. Solo para descargar wallpapers del Workshop.
-
-        No espera, no monitorea, no reintenta. Steam maneja todo el ciclo de vida.
-        Si Steam no esta corriendo, muestra un aviso.
-        """
+        """Abre el navegador del Steam Workshop en un WebView nativo."""
         try:
-            steam_running = subprocess.run(
+            steam_ok = subprocess.run(
                 ["pgrep", "-x", "steam"], capture_output=True, timeout=3
             ).returncode == 0
-
-            if not steam_running:
-                self._show_error(
-                    "Steam no esta corriendo. Abri Steam primero para usar Wallpaper Engine."
-                )
+            if not steam_ok:
+                self._show_error("Steam no esta corriendo. Inicia Steam para descargar wallpapers.")
                 return
 
-            subprocess.Popen(
-                ["steam", "steam://rungameid/431960"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            self._show_toast("Abriendo Wallpaper Engine via Steam...")
-
+            dialog = WorkshopBrowser(self)
+            dialog.present(self)
         except Exception as e:
-            self._show_error(f"Error al lanzar Wallpaper Engine: {e}")
+            self._show_error(f"Error al abrir Workshop: {e}")
 
     # =========================================================================
     # Daemon control
@@ -1161,6 +1149,100 @@ class RipoWallWindow(Adw.ApplicationWindow):
             except Exception:
                 pass
         threading.Thread(target=worker, daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
+# WorkshopBrowser — WebView nativo del Steam Workshop
+# ---------------------------------------------------------------------------
+
+WORKSHOP_URL = "https://steamcommunity.com/app/431960/workshop/"
+
+
+class WorkshopBrowser(Adw.Dialog):
+    """Dialogo con WebView del Steam Workshop para buscar wallpapers.
+
+    Cero dependencia de Proton/Wine/CEF. WebKit nativo de Linux.
+    El usuario navega, se loguea en Steam, y se suscribe a wallpapers.
+    Steam cliente descarga los archivos → el daemon los detecta → aparecen en la galeria.
+    """
+
+    def __init__(self, parent: RipoWallWindow):
+        super().__init__()
+        self.set_title("Steam Workshop — Wallpaper Engine")
+        self.set_content_width(1024)
+        self.set_content_height(720)
+
+        toolbar = Adw.ToolbarView()
+
+        header = Adw.HeaderBar()
+        header.set_show_title(True)
+        header.set_title_widget(Gtk.Label(label="Steam Workshop"))
+
+        # Botón de Steam (abre en navegador externo si WebView falla)
+        ext_btn = Gtk.Button.new_from_icon_name("web-browser-symbolic")
+        ext_btn.set_tooltip_text("Abrir en navegador externo")
+        ext_btn.connect("clicked", lambda b: subprocess.run(
+            ["xdg-open", WORKSHOP_URL], start_new_session=True))
+        header.pack_end(ext_btn)
+
+        close_btn = Gtk.Button.new_with_label("Cerrar")
+        close_btn.connect("clicked", lambda b: self.close())
+        header.pack_end(close_btn)
+
+        toolbar.add_top_bar(header)
+
+        # WebView
+        self._webview = WebKit.WebView()
+        self._webview.set_vexpand(True)
+
+        # Configurar para Steam
+        settings = self._webview.get_settings()
+        settings.set_enable_developer_extras(False)
+        settings.set_enable_write_console_messages_to_stdout(False)
+        settings.set_javascript_can_access_clipboard(False)
+
+        # Cargar el Workshop
+        self._webview.load_uri(WORKSHOP_URL)
+
+        # Barra de progreso
+        self._progress = Gtk.ProgressBar()
+        self._progress.set_show_text(False)
+        self._progress.set_margin_start(6)
+        self._progress.set_margin_end(6)
+        self._progress.set_margin_bottom(6)
+
+        self._webview.connect("notify::estimated-load-progress", self._on_progress)
+        self._webview.connect("load-changed", self._on_load_changed)
+
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_child(self._webview)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        box.set_vexpand(True)
+        box.append(scroll)
+        box.append(self._progress)
+
+        toolbar.set_content(box)
+        self.set_child(toolbar)
+
+        # Toast overlay para notificaciones
+        self._toast_overlay = Adw.ToastOverlay()
+        self._toast_overlay.set_child(toolbar)
+        self.set_child(self._toast_overlay)
+
+    def _on_progress(self, webview, _pspec):
+        self._progress.set_fraction(webview.get_estimated_load_progress())
+
+    def _on_load_changed(self, webview, load_event, _data=None):
+        if load_event == WebKit.LoadEvent.FINISHED:
+            self._progress.set_visible(False)
+        elif load_event == WebKit.LoadEvent.STARTED:
+            self._progress.set_visible(True)
+
+    def _toast(self, msg: str):
+        toast = Adw.Toast.new(msg)
+        toast.set_timeout(3)
+        self._toast_overlay.add_toast(toast)
 
 
 # ---------------------------------------------------------------------------
