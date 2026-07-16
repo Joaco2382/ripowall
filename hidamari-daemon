@@ -30,8 +30,8 @@ from hidamari_core import (
 )
 
 # Usar rutas del core (portable, multi-distro)
-WORKSHOP = H.WORKSHOP
-CONFIG = H.CONFIG_PATH
+WORKSHOP = os.path.expanduser("~/.local/share/Steam/steamapps/workshop/content/431960")
+CONFIG = os.path.expanduser("~/.config/hidamari/config.json")
 
 running = True
 
