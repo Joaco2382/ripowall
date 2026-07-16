@@ -224,7 +224,6 @@ class RipoWallWindow(Adw.ApplicationWindow):
         GLib.timeout_add_seconds(2, lambda: (self._run_auto_diagnostic(), False)[1])
 
         # Estado de Wallpaper Engine
-        self._we_btn_cooldown: int = 0
 
     # =========================================================================
     # Acciones de menu contextual (click derecho en cards)
