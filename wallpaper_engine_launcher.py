@@ -366,86 +366,108 @@ def launch(browse: bool = True, timeout: float = 60.0) -> WEStatus:
 
 
 def _launch_ui_direct(status: WEStatus) -> WEStatus:
-    """Lanza wallpaperui.exe directamente via Proton con flags optimizados."""
-    ui_path = os.path.join(WE_BIN_DIR, WE_UI_EXE)
-    if not os.path.isfile(ui_path):
-        status.last_error = f"Ejecutable no encontrado: {ui_path}"
-        return status
+    """La UI no arranco con Steam. Relanzar TODO via Steam (NO usar Proton directo).
 
-    # Flags base
-    ui_args = [
-        PROTON_BIN, "run", ui_path,
-        "-no-cef-sandbox",
-        "-weuimain",
-        "-window", "browsewallpapers",
-        "-buildv", "20000800000042",
-        "-skin", "dark",
-        "-language", USER_LOCALE,
-        "-steamlanguage", USER_LOCALE,
-        "-monitordetection", "managed",
-        "-disablefx",
-        "-x64",
-    ]
+    Proton directo pierde la autenticacion Steam → error 404 en CEF.
+    En su lugar, matamos todo y relanzamos via Steam desde cero.
+    """
+    print("[RipoWall] UI no detectada. Relanzando via Steam (mantiene auth)...", flush=True)
 
-    # Flags extra para Wayland
-    env = os.environ.copy()
-    env["STEAM_COMPAT_DATA_PATH"] = WE_COMPATDATA
-    env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = STEAM_DIR
-    env["SteamAppId"] = WE_APPID
-    env["SteamGameId"] = WE_APPID
-    env["PROTON_NO_ESYNC"] = "1"
+    # Matar todo
+    kill()
 
-    if DISPLAY_SERVER == "wayland":
-        env["PROTON_USE_WINED3D"] = "1"
-
-    print(f"[RipoWall] Proton: {PROTON_BIN}", flush=True)
-    print(f"[RipoWall] Display: {DISPLAY_SERVER}, Locale: {USER_LOCALE}", flush=True)
-
+    # Reintentar via Steam
+    print("[RipoWall] Reintentando lanzamiento completo...", flush=True)
     try:
         subprocess.Popen(
-            ui_args,
-            env=env,
+            [STEAM_EXE, f"steam://rungameid/{WE_APPID}"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
     except Exception as e:
-        status.last_error = f"Error al lanzar UI: {e}"
+        status.last_error = f"Error al relanzar via Steam: {e}"
         return status
 
-    if _wait_for_process(WE_UI_EXE, timeout=15):
-        return get_status()
-    else:
-        status = get_status()
-        if status.service_running:
-            status.last_error = "La UI no arranco pero el servicio SI esta activo."
-        else:
-            status.last_error = "La UI no arranco."
+    # Esperar servicio
+    if not _wait_for_process(WE_WALLPAPER_EXE, timeout=25):
+        status.last_error = "El servicio no arranco en el reintento."
         return status
+
+    # Esperar UI
+    if _wait_for_process(WE_UI_EXE, timeout=30):
+        return get_status()
+
+    # Segundo reintento (a veces Proton tarda mas en arrancar)
+    print("[RipoWall] Segundo reintento...", flush=True)
+    kill()
+    time.sleep(3)
+    try:
+        subprocess.Popen(
+            [STEAM_EXE, f"steam://rungameid/{WE_APPID}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as e:
+        status.last_error = f"Error en segundo reintento: {e}"
+        return status
+
+    if _wait_for_process(WE_WALLPAPER_EXE, timeout=25) and _wait_for_process(WE_UI_EXE, timeout=30):
+        return get_status()
+
+    status = get_status()
+    if status.service_running:
+        status.last_error = (
+            "La UI no pudo abrirse despues de 2 intentos. "
+            "El servicio de fondo SI esta corriendo.\n"
+            "Problema probable: CEF/Wayland. Intenta:\n"
+            "  1. Cerrar Steam y volver a abrirlo\n"
+            "  2. Ejecutar ripowall-we --restart-ui mas tarde"
+        )
+    else:
+        status.last_error = "Wallpaper Engine no pudo iniciar despues de 2 intentos."
+    return status
 
 
 def restart_ui() -> WEStatus:
-    """Reinicia solo la UI si el servicio esta corriendo."""
+    """Reinicia la UI relanzando via Steam (mantiene autenticacion).
+
+    NUNCA usa Proton directo porque pierde la auth de Steam → error 404 en CEF.
+    """
     status = get_status()
-    if not status.service_running:
-        status.last_error = "El servicio no esta corriendo. Usa launch() primero."
+    if not status.service_running and not status.steam_running:
+        status.last_error = "Ni Steam ni el servicio estan corriendo."
         return status
 
-    # Matar UI
-    for p in _find_wine_process(WE_UI_EXE):
-        try:
-            os.kill(p['pid'], signal.SIGTERM)
-        except OSError:
-            pass
-    time.sleep(2)
-    for p in _find_wine_process(WE_UI_EXE):
-        try:
-            os.kill(p['pid'], signal.SIGKILL)
-        except OSError:
-            pass
-    time.sleep(1)
+    print("[RipoWall] Reiniciando Wallpaper Engine via Steam...", flush=True)
 
-    return _launch_ui_direct(status)
+    # Matar todo
+    kill()
+    time.sleep(2)
+
+    # Relanzar via Steam (con auth)
+    try:
+        subprocess.Popen(
+            [STEAM_EXE, f"steam://rungameid/{WE_APPID}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as e:
+        status.last_error = f"Error al relanzar: {e}"
+        return status
+
+    if not _wait_for_process(WE_WALLPAPER_EXE, timeout=20):
+        status.last_error = "El servicio no arranco."
+        return status
+
+    if _wait_for_process(WE_UI_EXE, timeout=25):
+        return get_status()
+
+    status = get_status()
+    status.last_error = "Servicio OK, UI no arranco." if status.service_running else "Fallo el reinicio."
+    return status
 
 
 def kill() -> WEStatus:
