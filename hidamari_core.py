@@ -409,12 +409,17 @@ def get_server_properties() -> dict:
 
 
 def reload_config() -> bool:
-    """Recarga config.json en Hidamari vía DBus player."""
+    """Recarga config.json en Hidamari via DBus server.
+
+    IMPORTANTE: El server SI expone reload() en la interfaz hidamari.server.
+    El player NO tiene interfaz custom — llamar a player.reload_config
+    siempre fallaba silenciosamente (ServiceUnknown).
+    """
     try:
         subprocess.run(
-            ["gdbus", "call", "--session", "--dest", DBUS_PLAYER_BUS,
-             "--object-path", DBUS_PLAYER_PATH,
-             "--method", f"{DBUS_PLAYER_IFACE}.reload_config"],
+            ["gdbus", "call", "--session", "--dest", DBUS_SERVER_BUS,
+             "--object-path", DBUS_SERVER_PATH,
+             "--method", f"{DBUS_SERVER_IFACE}.reload"],
             capture_output=True, timeout=5, check=True
         )
         return True
