@@ -1161,16 +1161,24 @@ WORKSHOP_URL = "https://steamcommunity.com/app/431960/workshop/"
 class WorkshopBrowser(Adw.Dialog):
     """Dialogo con WebView del Steam Workshop para buscar wallpapers.
 
-    Cero dependencia de Proton/Wine/CEF. WebKit nativo de Linux.
-    El usuario navega, se loguea en Steam, y se suscribe a wallpapers.
-    Steam cliente descarga los archivos → el daemon los detecta → aparecen en la galeria.
+    Flujo:
+    1. Abre steamcommunity.com/app/431960/workshop/ en WebKit nativo
+    2. Si no hay sesion, Steam pide login (usuario se loguea una vez)
+    3. Cookies persisten en WebKit, sesion se mantiene
+    4. Usuario navega, busca, filtra y hace clic en Subscribe
+    5. El Subscribe es un POST a la API web de Steam Community
+    6. Steam cliente detecta la suscripcion y descarga los archivos
+    7. Daemon de RipoWall detecta los nuevos MP4 y aparecen en la galeria
+
+    steam:// URIs se interceptan y redirigen a xdg-open.
+    Cero dependencia de Proton/Wine/CEF.
     """
 
     def __init__(self, parent: RipoWallWindow):
         super().__init__()
         self.set_title("Steam Workshop — Wallpaper Engine")
-        self.set_content_width(1024)
-        self.set_content_height(720)
+        self.set_content_width(1100)
+        self.set_content_height(750)
 
         toolbar = Adw.ToolbarView()
 
@@ -1178,7 +1186,7 @@ class WorkshopBrowser(Adw.Dialog):
         header.set_show_title(True)
         header.set_title_widget(Gtk.Label(label="Steam Workshop"))
 
-        # Botón de Steam (abre en navegador externo si WebView falla)
+        # Botón: abrir en navegador externo (fallback)
         ext_btn = Gtk.Button.new_from_icon_name("web-browser-symbolic")
         ext_btn.set_tooltip_text("Abrir en navegador externo")
         ext_btn.connect("clicked", lambda b: subprocess.run(
@@ -1191,29 +1199,35 @@ class WorkshopBrowser(Adw.Dialog):
 
         toolbar.add_top_bar(header)
 
-        # WebView
+        # ── WebView + Config ──────────────────────────────────────────
         self._webview = WebKit.WebView()
         self._webview.set_vexpand(True)
 
-        # Configurar para Steam
         settings = self._webview.get_settings()
+        settings.set_user_agent(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 "
+            "(KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+        )
         settings.set_enable_developer_extras(False)
-        settings.set_enable_write_console_messages_to_stdout(False)
         settings.set_javascript_can_access_clipboard(False)
 
-        # Cargar el Workshop
+        # Interceptar steam:// URIs → xdg-open
+        self._webview.connect("decide-policy", self._on_decide_policy)
+
+        # Cargar Workshop
         self._webview.load_uri(WORKSHOP_URL)
 
-        # Barra de progreso
+        # ── Progress bar ──────────────────────────────────────────────
         self._progress = Gtk.ProgressBar()
         self._progress.set_show_text(False)
         self._progress.set_margin_start(6)
         self._progress.set_margin_end(6)
         self._progress.set_margin_bottom(6)
-
-        self._webview.connect("notify::estimated-load-progress", self._on_progress)
+        self._webview.connect("notify::estimated-load-progress",
+                              self._on_progress)
         self._webview.connect("load-changed", self._on_load_changed)
 
+        # ── Layout ────────────────────────────────────────────────────
         scroll = Gtk.ScrolledWindow()
         scroll.set_child(self._webview)
 
@@ -1225,10 +1239,17 @@ class WorkshopBrowser(Adw.Dialog):
         toolbar.set_content(box)
         self.set_child(toolbar)
 
-        # Toast overlay para notificaciones
-        self._toast_overlay = Adw.ToastOverlay()
-        self._toast_overlay.set_child(toolbar)
-        self.set_child(self._toast_overlay)
+    def _on_decide_policy(self, webview, decision, decision_type):
+        """Intercepta steam:// URIs y las pasa a xdg-open."""
+        if decision_type != WebKit.PolicyDecisionType.NAVIGATION_ACTION:
+            return False
+        nav = decision.get_navigation_action()
+        uri = nav.get_request().get_uri()
+        if uri.startswith("steam://"):
+            decision.ignore()
+            subprocess.run(["xdg-open", uri], start_new_session=True)
+            return True
+        return False
 
     def _on_progress(self, webview, _pspec):
         self._progress.set_fraction(webview.get_estimated_load_progress())
@@ -1238,11 +1259,6 @@ class WorkshopBrowser(Adw.Dialog):
             self._progress.set_visible(False)
         elif load_event == WebKit.LoadEvent.STARTED:
             self._progress.set_visible(True)
-
-    def _toast(self, msg: str):
-        toast = Adw.Toast.new(msg)
-        toast.set_timeout(3)
-        self._toast_overlay.add_toast(toast)
 
 
 # ---------------------------------------------------------------------------

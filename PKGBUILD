@@ -15,6 +15,7 @@ depends=(
     'python-setproctitle'
     'python-gobject'
     'gtk4'
+    'webkitgtk-6.0'
     'libadwaita'
     'vlc'
     'yt-dlp'
