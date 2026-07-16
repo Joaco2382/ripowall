@@ -11,7 +11,9 @@ API:
   Daemon:       get_daemon_status(), daemon_start(), daemon_stop(), daemon_logs()
   Flat folder:  rebuild_flat_folder()
   Wallpaper Engine: launch_wallpaper_engine(), get_we_status(), kill_wallpaper_engine()
-"""
+"""  # noqa: D100
+
+from __future__ import annotations
 
 import json
 import os
@@ -115,6 +117,8 @@ def get_all_wallpapers() -> list[Wallpaper]:
     """Escanea el Workshop de Steam y devuelve todos los wallpapers MP4."""
     results = []
     if not os.path.isdir(WORKSHOP):
+        print(f"[core] Workshop no encontrado en {WORKSHOP}. "
+              "¿Steam instalado? ¿Wallpaper Engine suscrito?", flush=True)
         return results
     try:
         for folder in os.listdir(WORKSHOP):
@@ -249,17 +253,14 @@ def get_current_wallpapers() -> dict[str, str]:
 
 # ── DBus Client (Hidamari Server) ──────────────────────────────────────────
 
-def _dbus_call(dest: str, path: str, iface: str, method: str, args: str = "") -> bool:
-    """Llama a un método DBus. Retorna True si OK, False si error."""
+def _dbus_call(dest: str, path: str, iface: str, method: str) -> bool:
+    """Llama a un metodo DBus. Retorna True si OK, False si error."""
     try:
-        cmd = ["gdbus", "call", "--session", "--dest", dest,
-               "--object-path", path, "--method", method]
-        if args:
-            cmd[-1] = f"{iface}.{method}"
-            # Reconstruir comando con args adicionales
-            cmd = ["gdbus", "call", "--session", "--dest", dest,
-                   "--object-path", path, "--method", f"{iface}.{method}"]
-        subprocess.run(cmd, capture_output=True, timeout=5, check=True)
+        subprocess.run(
+            ["gdbus", "call", "--session", "--dest", dest,
+             "--object-path", path, "--method", f"{iface}.{method}"],
+            capture_output=True, timeout=5, check=True
+        )
         return True
     except Exception:
         return False
@@ -563,6 +564,12 @@ def rebuild_flat_folder() -> int:
             while os.path.exists(f"{base}_{n}{ext}"):
                 n += 1
             dst = f"{base}_{n}{ext}"
+        # Limpiar symlink roto si existe
+        if os.path.islink(dst):
+            try:
+                os.unlink(dst)
+            except OSError:
+                pass
         try:
             os.symlink(wp.path, dst)
             count += 1
@@ -669,7 +676,7 @@ def try_unsubscribe(workshop_id: str) -> bool:
 
         # Formato Valve KeyValues. Buscar el bloque del workshop_id y eliminarlo.
         pattern = (
-            r'"\s*"' + re.escape(workshop_id) + r'"\s*"\s*\n'
+            r'"' + re.escape(workshop_id) + r'"\s*\n'
             r'\s*\{\s*\n'
             r'(?:\s*"[^"]*"\s*"[^"]*"\s*\n)*'
             r'\s*\}\s*\n?'

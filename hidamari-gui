@@ -4,7 +4,9 @@ RipoWall GUI -- GTK4 + Adwaita wallpaper manager.
 Gestiona wallpapers animados con sidebar de monitores, galeria GridView,
 busqueda client-side, control DBus de reproduccion/rotacion y daemon systemd.
 Un solo archivo, sin plantillas XML.
-"""
+"""  # noqa: D100
+
+from __future__ import annotations
 
 import json
 import os
@@ -251,8 +253,8 @@ class RipoWallWindow(Adw.ApplicationWindow):
             os.makedirs(os.path.dirname(GUI_STATE_PATH), exist_ok=True)
             maximized = self.is_maximized()
             if not maximized:
-                geo = self.get_default_size()
-                state = {"width": geo.width, "height": geo.height, "maximized": False}
+                w, h = self.get_default_size()
+                state = {"width": w, "height": h, "maximized": False}
             else:
                 state = {"width": 960, "height": 680, "maximized": True}
             with open(GUI_STATE_PATH, "w") as f:
@@ -1244,7 +1246,7 @@ class RipoWallApp(Adw.Application):
         dialog.set_copyright("© 2026 RipoTech — ripotech.cl")
         dialog.set_developers(["Joaquin Espinosa <104966815+Joaco2382@users.noreply.github.com>"])
         dialog.set_designers(["RipoTech Design"])
-        dialog.set_license_type(Gtk.License(2))  # GPL 2.0
+        dialog.set_license_type(getattr(Gtk.License, 'GPL_2_0', 2))
         dialog.present(self.active_window)
 
     def _on_search(self, action, param):

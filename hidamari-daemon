@@ -8,6 +8,8 @@ Servicio systemd:
 """
 
 import os
+import random
+import select
 import signal
 import subprocess
 import sys
@@ -27,8 +29,9 @@ from hidamari_core import (
     Wallpaper,
 )
 
-WORKSHOP = os.path.expanduser("~/.local/share/Steam/steamapps/workshop/content/431960")
-CONFIG = os.path.expanduser("~/.config/hidamari/config.json")
+# Usar rutas del core (portable, multi-distro)
+WORKSHOP = H.WORKSHOP
+CONFIG = H.CONFIG_PATH
 
 running = True
 
@@ -71,7 +74,6 @@ def assign_wallpapers_to_config(config, wallpapers):
 
     conns = [m.connector for m in monitors]
 
-    import random
     assignment = pick_random_wallpapers(conns, wallpapers, current_paths)
     if not assignment and wallpapers:
         assignment = pick_random_wallpapers(conns, wallpapers)  # sin avoid
@@ -210,7 +212,6 @@ def main():
 
             # 2. Hotplug
             if monitor_watcher and monitor_watcher.poll() is None:
-                import select
                 try:
                     ready, _, _ = select.select([monitor_watcher.stdout], [], [], 0)
                     if ready:

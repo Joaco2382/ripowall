@@ -18,7 +18,9 @@ Problemas que resuelve:
   3. UI que no abre → monitorea y reinicia wallpaperui.exe si el servicio ya arranco.
   4. Proton no encontrado → auto-deteccion de versiones disponibles.
   5. Paths hardcodeados → todo se detecta: Steam, Proton, locale, display server.
-"""
+"""  # noqa: D100
+
+from __future__ import annotations
 
 import json
 import os
@@ -524,8 +526,8 @@ def monitor(interval: float = 5.0):
 def _cli():
     import argparse
     parser = argparse.ArgumentParser(description="RipoWall — Wallpaper Engine Launcher")
-    parser.add_argument("--browse", "-b", action="store_true", default=True,
-                        help="Abrir UI de navegacion (default)")
+    parser.add_argument("--browse", "-b", action="store_true",
+                        help="Abrir UI de navegacion")
     parser.add_argument("--no-browse", action="store_true",
                         help="Solo servicio de fondo")
     parser.add_argument("--status", "-s", action="store_true",
@@ -592,7 +594,7 @@ def _cli():
     print(f"  Display: {DISPLAY_SERVER}")
     print()
 
-    s = launch(browse=not args.no_browse)
+    s = launch(browse=args.browse or not args.no_browse)
     if s.service_running:
         print("\n✓ Wallpaper Engine iniciado.")
         if s.ui_running:
