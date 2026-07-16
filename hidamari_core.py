@@ -315,9 +315,9 @@ def assign_video_to_monitor(video_path: str, monitor: str) -> bool:
         save_config(config)
 
         subprocess.run(
-            ["gdbus", "call", "--session", "--dest", DBUS_PLAYER_BUS,
-             "--object-path", DBUS_PLAYER_PATH,
-             "--method", f"{DBUS_PLAYER_IFACE}.reload_config"],
+            ["gdbus", "call", "--session", "--dest", DBUS_SERVER_BUS,
+             "--object-path", DBUS_SERVER_PATH,
+             "--method", f"{DBUS_SERVER_IFACE}.reload"],
             capture_output=True, timeout=5, check=True
         )
         return True

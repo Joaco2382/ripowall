@@ -52,6 +52,8 @@ REQUIRED_BINARIES = [
     "wallpaper_engine_launcher.py", "hidamari-sync", "hidamari-rotate",
 ]
 
+DIAG_OUTPUT_DIR = Path.home() / ".cache" / "ripowall" / "diagnostics"
+
 
 @dataclass
 class CheckResult:
@@ -410,7 +412,7 @@ def check_hidamari_player(report: DiagnosticReport) -> None:
 
 def check_hidamari_dbus(report: DiagnosticReport) -> None:
     ping = _run(["gdbus", "call", "--session",
-        "--dest", "io.github.jeffshee.Hidamari",
+        "--dest", "io.github.jeffshee.Hidamari.server",
         "--object-path", "/io/github/jeffshee/Hidamari/server",
         "--method", "org.freedesktop.DBus.Peer.Ping"])
     if ping.returncode != 0:
@@ -420,7 +422,7 @@ def check_hidamari_dbus(report: DiagnosticReport) -> None:
             detail=ping.stderr.strip()))
         return
     intro = _run(["gdbus", "introspect", "--session",
-        "--dest", "io.github.jeffshee.Hidamari",
+        "--dest", "io.github.jeffshee.Hidamari.server",
         "--object-path", "/io/github/jeffshee/Hidamari/server",
         "--recurse", "--xml"])
     has_reload = 'name="reload"' in intro.stdout
@@ -659,6 +661,39 @@ def render_markdown(report: DiagnosticReport) -> str:
             lines.append(f"**Fix:** {r.fix_suggestion}")
         lines.append("---")
     return "\n".join(lines)
+
+
+def has_critical_errors(report: DiagnosticReport) -> bool:
+    """True si hay al menos un resultado con status == 'error'."""
+    return any(r.status == "error" for r in report.results)
+
+
+def auto_diagnose_and_save() -> list[dict]:
+    """Ejecuta diagnostico completo, guarda reportes y retorna solo los criticos.
+
+    Guarda ripowall_{ts}.json y ripowall_{ts}.md en DIAG_OUTPUT_DIR.
+    Retorna lista de resultados con status == 'error' (solo criticos, sin warnings).
+    Captura cualquier excepcion — nunca rompe al caller.
+    """
+    try:
+        DIAG_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        report = run_full_diagnostic(repair=False)
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        (DIAG_OUTPUT_DIR / f"ripowall_{ts}.json").write_text(render_json(report))
+        (DIAG_OUTPUT_DIR / f"ripowall_{ts}.md").write_text(render_markdown(report))
+
+        return [
+            {"category": r.category, "name": r.name, "status": r.status,
+             "message": r.message, "fix": r.fix_suggestion}
+            for r in report.results if r.status == "error"
+        ]
+    except Exception as e:
+        try:
+            print(f"[ripowall autodiag] Fallo: {e}", flush=True)
+        except Exception:
+            pass
+        return []
 
 
 def main():

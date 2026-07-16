@@ -2,22 +2,18 @@
 """
 RipoWall — Wallpaper Engine Launcher para Linux (portable).
 
-Lanza Wallpaper Engine (Steam/Proton) de forma confiable en cualquier distro Linux,
-resolviendo problemas de autenticacion Steam, crashes de CEF en Wayland,
-y la inconsistencia al abrir la UI.
-
+Solo para abrir WE, descargar wallpapers del Workshop, y cerrar.
 No tiene paths hardcodeados. Todo se detecta en runtime.
 
 Modos:
-  CLI:  python wallpaper_engine_launcher.py [--browse] [--status] [--kill] [--monitor]
-  API:  from wallpaper_engine_launcher import launch, is_running, kill, status
+  CLI:  python wallpaper_engine_launcher.py [--browse] [--status] [--kill]
+  API:  from wallpaper_engine_launcher import launch, kill, status
 
 Problemas que resuelve:
   1. Steam auth inconsistente → lanza SIEMPRE via Steam para heredar pipes de auth.
   2. CEF crash en Wayland → --no-sandbox, deteccion de display server.
-  3. UI que no abre → monitorea y reinicia wallpaperui.exe si el servicio ya arranco.
-  4. Proton no encontrado → auto-deteccion de versiones disponibles.
-  5. Paths hardcodeados → todo se detecta: Steam, Proton, locale, display server.
+  3. Proton no encontrado → auto-deteccion de versiones disponibles.
+  4. Paths hardcodeados → todo se detecta: Steam, Proton, locale, display server.
 """  # noqa: D100
 
 from __future__ import annotations
@@ -495,17 +491,15 @@ def launch(browse: bool = True, timeout: float = 60.0) -> WEStatus:
 
 
 def _launch_ui_direct(status: WEStatus) -> WEStatus:
-    """La UI no arranco con Steam. Relanzar TODO via Steam (NO usar Proton directo).
+    """Un solo reintento: mata todo y relanza via Steam.
 
     Proton directo pierde la autenticacion Steam → error 404 en CEF.
-    En su lugar, matamos todo y relanzamos via Steam desde cero.
+    Si no arranca en este unico reintento, reporta error y sale.
     """
     print("[RipoWall] UI no detectada. Relanzando via Steam (mantiene auth)...", flush=True)
 
-    # Matar todo
     kill()
 
-    # Reintentar via Steam
     print("[RipoWall] Reintentando lanzamiento completo...", flush=True)
     try:
         subprocess.Popen(
@@ -518,44 +512,21 @@ def _launch_ui_direct(status: WEStatus) -> WEStatus:
         status.last_error = f"Error al relanzar via Steam: {e}"
         return status
 
-    # Esperar servicio
     if not _wait_for_process(WE_WALLPAPER_EXE, timeout=25):
         status.last_error = "El servicio no arranco en el reintento."
         return status
 
-    # Esperar UI
     if _wait_for_process(WE_UI_EXE, timeout=30):
-        return get_status()
-
-    # Segundo reintento (a veces Proton tarda mas en arrancar)
-    print("[RipoWall] Segundo reintento...", flush=True)
-    kill()
-    time.sleep(3)
-    try:
-        subprocess.Popen(
-            [STEAM_EXE, f"steam://rungameid/{WE_APPID}"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-    except Exception as e:
-        status.last_error = f"Error en segundo reintento: {e}"
-        return status
-
-    if _wait_for_process(WE_WALLPAPER_EXE, timeout=25) and _wait_for_process(WE_UI_EXE, timeout=30):
         return get_status()
 
     status = get_status()
     if status.service_running:
         status.last_error = (
-            "La UI no pudo abrirse despues de 2 intentos. "
-            "El servicio de fondo SI esta corriendo.\n"
-            "Problema probable: CEF/Wayland. Intenta:\n"
-            "  1. Cerrar Steam y volver a abrirlo\n"
-            "  2. Ejecutar ripowall-we --restart-ui mas tarde"
+            "La UI no pudo abrirse. El servicio de fondo SI esta corriendo.\n"
+            "Ejecuta ripowall-we --restart-ui para reintentar."
         )
     else:
-        status.last_error = "Wallpaper Engine no pudo iniciar despues de 2 intentos."
+        status.last_error = "Wallpaper Engine no pudo iniciar."
     return status
 
 
@@ -636,37 +607,6 @@ def kill() -> WEStatus:
     return get_status()
 
 
-# ── Monitor (keep-alive) ────────────────────────────────────────────────────
-
-def monitor(interval: float = 5.0):
-    """Modo demonio: monitorea WE y reinicia la UI si crashea."""
-    running = True
-
-    def _shutdown(signum, frame):
-        nonlocal running
-        running = False
-
-    signal.signal(signal.SIGTERM, _shutdown)
-    signal.signal(signal.SIGINT, _shutdown)
-
-    print("[RipoWall] Monitor de Wallpaper Engine iniciado (Ctrl+C para detener).", flush=True)
-
-    while running:
-        try:
-            s = get_status()
-            if not s.service_running:
-                print("[RipoWall] Servicio detenido. Limpiando flags y re-lanzando...", flush=True)
-                pre_launch_cleanup()
-                launch(browse=True)
-            elif not s.ui_running:
-                print("[RipoWall] UI caida. Reiniciando...", flush=True)
-                restart_ui()
-            time.sleep(interval)
-        except Exception as e:
-            print(f"[RipoWall] Error en monitor: {e}", flush=True)
-            time.sleep(interval)
-
-
 # ── CLI ─────────────────────────────────────────────────────────────────────
 
 def _cli():
@@ -682,8 +622,6 @@ def _cli():
                         help="Detener Wallpaper Engine")
     parser.add_argument("--restart-ui", action="store_true",
                         help="Reiniciar solo la UI")
-    parser.add_argument("--monitor", "-m", action="store_true",
-                        help="Modo monitor (keep-alive)")
     parser.add_argument("--json", action="store_true",
                         help="Output JSON (para --status)")
 
@@ -727,10 +665,6 @@ def _cli():
         else:
             print(f"✗ {s.last_error}")
             sys.exit(1)
-        return
-
-    if args.monitor:
-        monitor()
         return
 
     # Default: launch

@@ -25,9 +25,9 @@ from gi.repository import Gtk, Adw, GLib, Gdk, Gio, GObject
 import hidamari_core as H
 
 try:
-    import ripowall_diagnostics as RD
+    from ripowall_diagnostics import auto_diagnose_and_save
 except ImportError:
-    RD = None
+    auto_diagnose_and_save = lambda: []  # noqa: E731
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -220,6 +220,9 @@ class RipoWallWindow(Adw.ApplicationWindow):
         # Wallpapers en background
         self._load_wallpapers_async()
 
+        # Auto-diagnostico silencioso (con delay para que la UI cargue)
+        GLib.timeout_add_seconds(2, lambda: (self._run_auto_diagnostic(), False)[1])
+
         # Estado de Wallpaper Engine
         self._we_running = False
         self._we_ui_running = False
@@ -367,11 +370,6 @@ class RipoWallWindow(Adw.ApplicationWindow):
         self.we_btn.set_tooltip_text("Abrir Wallpaper Engine (Steam Workshop)")
         self.we_btn.connect("clicked", self._on_we_launch)
         header.pack_end(self.we_btn)
-
-        self.diag_btn = Gtk.Button.new_from_icon_name("system-run-symbolic")
-        self.diag_btn.set_tooltip_text("Diagnosticar RipoWall")
-        self.diag_btn.connect("clicked", self._on_diagnostics)
-        header.pack_end(self.diag_btn)
 
         rotate_btn = Gtk.Button.new_from_icon_name("view-refresh-symbolic")
         rotate_btn.set_tooltip_text("Rotar wallpapers (Ctrl+R)")
@@ -1146,42 +1144,12 @@ class RipoWallWindow(Adw.ApplicationWindow):
         else:
             err = result.get('error', 'Error desconocido')
             self._show_error(f"Wallpaper Engine: {err}")
-            # Si falla, ofrecer diagnostico automatico
-            self._show_diagnostics_on_failure(err)
         self._refresh_we_status()
         return False
 
     # =========================================================================
-    # Diagnostico
+    # Daemon control
     # =========================================================================
-
-    def _on_diagnostics(self, btn: Gtk.Button):
-        """Abre el dialogo de diagnostico (ejecuta en background)."""
-        if RD is None:
-            self._show_error("Modulo ripowall_diagnostics no disponible.")
-            return
-        btn.set_sensitive(False)
-        dialog = DiagnosticsDialog(self)
-        dialog.connect("closed", lambda d: btn.set_sensitive(True))
-        dialog.present(self)
-
-    def _show_diagnostics_on_failure(self, error_message: str):
-        """Ofrece diagnostico automatico cuando WE falla."""
-        dialog = Adw.AlertDialog.new(
-            "Wallpaper Engine fallo",
-            f"{error_message}\n\nEjecutar diagnostico completo para identificar el problema?",
-        )
-        dialog.add_response("close", "Cerrar")
-        dialog.add_response("diagnose", "Diagnosticar")
-        dialog.set_default_response("diagnose")
-        dialog.set_close_response("close")
-
-        def on_response(d, response):
-            if response == "diagnose":
-                GLib.idle_add(lambda: self._on_diagnostics(self.diag_btn) or False)
-
-        dialog.connect("response", on_response)
-        dialog.present(self)
 
     def _on_daemon_toggle(self, btn: Gtk.Button):
         try:
@@ -1224,173 +1192,26 @@ class RipoWallWindow(Adw.ApplicationWindow):
         toast.set_timeout(3)
         self.toast_overlay.add_toast(toast)
 
+    # =========================================================================
+    # Auto-diagnostico silencioso
+    # =========================================================================
 
-# ---------------------------------------------------------------------------
-# DiagnosticsDialog
-# ---------------------------------------------------------------------------
-
-class DiagnosticsDialog(Adw.Dialog):
-    """Dialogo modal de diagnostico RipoWall."""
-
-    def __init__(self, parent: RipoWallWindow):
-        super().__init__()
-        self.set_title("Diagnostico RipoWall")
-        self.set_content_width(620)
-        self.set_content_height(520)
-        self._parent = parent
-        self._report = None
-
-        toolbar = Adw.ToolbarView()
-        header = Adw.HeaderBar()
-        toolbar.add_top_bar(header)
-
-        self._content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        self._content.set_vexpand(True)
-
-        self._summary_lbl = Gtk.Label(xalign=0)
-        self._summary_lbl.set_visible(False)
-        self._content.append(self._summary_lbl)
-
-        self._spinner_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        self._spinner_box.set_valign(Gtk.Align.CENTER)
-        self._spinner_box.set_halign(Gtk.Align.CENTER)
-        sp = Gtk.Spinner()
-        sp.set_size_request(42, 42)
-        sp.set_spinning(True)
-        self._spinner_box.append(sp)
-        self._spinner_box.append(Gtk.Label(label="Ejecutando diagnostico..."))
-        self._content.append(self._spinner_box)
-
-        self._scroll = Gtk.ScrolledWindow()
-        self._scroll.set_vexpand(True)
-        self._scroll.set_visible(False)
-        self._results_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        self._scroll.set_child(self._results_box)
-        self._content.append(self._scroll)
-
-        bbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        bbar.set_halign(Gtk.Align.END)
-        bbar.set_margin_top(8)
-        bbar.set_margin_end(6)
-        bbar.set_margin_bottom(6)
-
-        self._repair_btn = Gtk.Button.new_with_label("Reparar")
-        self._repair_btn.add_css_class("suggested-action")
-        self._repair_btn.set_sensitive(False)
-        self._repair_btn.connect("clicked", self._on_repair)
-        bbar.append(self._repair_btn)
-
-        close_btn = Gtk.Button.new_with_label("Cerrar")
-        close_btn.connect("clicked", lambda b: self.close())
-        bbar.append(close_btn)
-
-        self._content.append(bbar)
-        toolbar.set_content(self._content)
-        self.set_child(toolbar)
-
-        self._start()
-
-    def _start(self):
+    def _run_auto_diagnostic(self):
+        """Ejecuta diagnostico en background al iniciar. Solo notifica si hay criticos."""
         def worker():
             try:
-                if RD:
-                    r = RD.run_full_diagnostic(repair=False)
-                else:
-                    r = type('R', (), {'summary': {'ok':0,'warning':0,'error':1},
-                        'all_ok': False, 'results': [type('C',(),{'category':'RIPOWALL',
-                        'name':'Import','status':'error','message':'ripowall_diagnostics no disponible',
-                        'fix_suggestion':'','detail':'','repaired':False})]})()
-            except Exception as e:
-                r = type('R', (), {'summary': {'ok':0,'warning':0,'error':1},
-                    'all_ok': False, 'results': [type('C',(),{'category':'RIPOWALL',
-                    'name':'Crash','status':'error','message':str(e),
-                    'fix_suggestion':'','detail':'','repaired':False})]})()
-            GLib.idle_add(self._done, r)
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _done(self, report):
-        self._report = report
-        self._spinner_box.set_visible(False)
-        self._scroll.set_visible(True)
-        s = report.summary
-        self._summary_lbl.set_visible(True)
-        self._summary_lbl.set_markup(
-            f'<span size="larger">'
-            f'<span foreground="#2ecc71">OK: {s["ok"]}</span>  '
-            f'<span foreground="#f39c12">Warn: {s["warning"]}</span>  '
-            f'<span foreground="#e74c3c">Err: {s["error"]}</span>'
-            f'</span>')
-        self._populate(report)
-        self._repair_btn.set_sensitive(any(r.status != "ok" for r in report.results))
-        return False
-
-    def _populate(self, report):
-        while True:
-            c = self._results_box.get_first_child()
-            if c is None:
-                break
-            self._results_box.remove(c)
-        cat = ""
-        for r in report.results:
-            if r.category != cat:
-                cat = r.category
-                exp = Gtk.Expander()
-                cats = {"ok":0,"warning":0,"error":0}
-                for rr in report.results:
-                    if rr.category == cat:
-                        cats[rr.status] += 1
-                lbl = Gtk.Label(xalign=0)
-                lbl.set_markup(f'{cat}  '
-                    f'<span foreground="#2ecc71" size="small">{cats["ok"]}✓</span>  '
-                    f'<span foreground="#f39c12" size="small">{cats["warning"]}⚠</span>  '
-                    f'<span foreground="#e74c3c" size="small">{cats["error"]}✗</span>')
-                box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
-                exp.set_label_widget(lbl)
-                exp.set_child(box)
-                self._results_box.append(exp)
-            row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
-            icons = {"ok": ('✓', "#2ecc71"), "warning": ('⚠', "#f39c12"), "error": ('✗', "#e74c3c")}
-            ic, clr = icons.get(r.status, icons["error"])
-            top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-            top.append(Gtk.Label(label=f'<span foreground="{clr}" size="large">{ic}</span>', use_markup=True, xalign=0))
-            top.append(Gtk.Label(label=r.name, xalign=0, hexpand=True, halign=Gtk.Align.START))
-            if r.repaired:
-                top.append(Gtk.Label(label='<span foreground="#2ecc71">FIXED</span>', use_markup=True))
-            row.append(top)
-            if r.message and r.status != "ok":
-                row.append(Gtk.Label(label=r.message, xalign=0, wrap=True, max_width_chars=55, css_classes=["dim-label"]))
-            if r.fix_suggestion and r.status != "ok":
-                row.append(Gtk.Label(label=f"Fix: {r.fix_suggestion}", xalign=0, wrap=True, max_width_chars=55, css_classes=["dim-label"]))
-            box.append(row)
-
-    def _on_repair(self, btn):
-        btn.set_sensitive(False)
-        btn.set_label("Reparando...")
-        def worker():
-            try:
-                r = RD.run_full_diagnostic(repair=True) if RD else self._report
+                criticals = auto_diagnose_and_save()
+                if criticals:
+                    msgs = [c['name'] for c in criticals[:3]]
+                    extra = f" (+{len(criticals) - 3} mas)" if len(criticals) > 3 else ""
+                    GLib.idle_add(
+                        self._show_toast,
+                        f"Problemas detectados: {', '.join(msgs)}{extra}. "
+                        f"Ver ~/.cache/ripowall/diagnostics/"
+                    )
             except Exception:
-                r = self._report
-            GLib.idle_add(self._repair_done, r)
+                pass
         threading.Thread(target=worker, daemon=True).start()
-
-    def _repair_done(self, report):
-        self._report = report
-        btn = self._repair_btn
-        btn.set_label("Reparar")
-        s = report.summary
-        self._summary_lbl.set_markup(
-            f'<span size="larger">'
-            f'<span foreground="#2ecc71">OK: {s["ok"]}</span>  '
-            f'<span foreground="#f39c12">Warn: {s["warning"]}</span>  '
-            f'<span foreground="#e74c3c">Err: {s["error"]}</span>'
-            f'</span>')
-        self._populate(report)
-        btn.set_sensitive(any(r.status != "ok" for r in report.results))
-        fixed = sum(1 for r in report.results if r.repaired)
-        if fixed:
-            self._parent._show_toast(f"{fixed} problema(s) reparado(s)")
-        return False
 
 
 # ---------------------------------------------------------------------------
