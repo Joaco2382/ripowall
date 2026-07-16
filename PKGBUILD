@@ -39,6 +39,7 @@ package() {
     install -Dm755 hidamari-daemon          "${pkgdir}/usr/bin/hidamari-daemon"
     install -Dm755 hidamari-gui             "${pkgdir}/usr/bin/hidamari-gui"
     install -Dm755 wallpaper_engine_launcher.py "${pkgdir}/usr/bin/wallpaper_engine_launcher.py"
+    install -Dm755 ripowall_diagnostics.py  "${pkgdir}/usr/bin/ripowall_diagnostics.py"
 
     # Symlink ripowall-we
     ln -s /usr/bin/wallpaper_engine_launcher.py "${pkgdir}/usr/bin/ripowall-we"
