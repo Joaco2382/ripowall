@@ -190,6 +190,126 @@ class WEStatus:
     display_server: str = ""
 
 
+# ── Crash Recovery / Safe Mode ─────────────────────────────────────────────
+
+def _get_we_config_path() -> str:
+    """Path al config.json de Wallpaper Engine."""
+    return os.path.join(WE_DIR, "config.json")
+
+
+def _get_we_registry_path() -> str:
+    """Path al user.reg de Wine en el prefix de WE."""
+    return os.path.join(WE_COMPATDATA, "pfx", "user.reg")
+
+
+def reset_faulty_shutdown() -> bool:
+    """Resetea faultyShutdown=1 → 0 en el registro de Wine.
+
+    Wallpaper Engine escribe faultyShutdown=1 al iniciar y =0 al cerrar
+    limpiamente. Si matamos WE con SIGKILL, el flag queda en 1 y al
+    siguiente inicio muestra el dialogo "no se cerro correctamente / safe mode".
+
+    Returns True si se modifico el registro.
+    """
+    reg_path = _get_we_registry_path()
+    if not os.path.isfile(reg_path):
+        return False
+
+    try:
+        with open(reg_path, encoding='utf-8', errors='replace') as f:
+            content = f.read()
+
+        # Buscar la seccion [Software\\WallpaperEngine] y su faultyShutdown
+        # El formato en user.reg es multilinea:
+        # [Software\\WallpaperEngine]  ...  "faultyShutdown"=dword:00000001
+        pattern = (
+            r'(\[Software\\\\WallpaperEngine\].*?'
+            r'"faultyShutdown"=dword:)00000001'
+        )
+        if not re.search(pattern, content, re.DOTALL):
+            return False  # ya esta en 0 o no existe
+
+        new_content = re.sub(pattern, r'\g<1>00000000', content, flags=re.DOTALL)
+
+        with open(reg_path, 'w', encoding='utf-8') as f:
+            f.write(new_content)
+        return True
+    except OSError:
+        return False
+
+
+def ensure_safemode_disabled() -> bool:
+    """Asegura safemode=false en config.json de Wallpaper Engine.
+
+    Si safemode esta en true, WE no renderiza wallpapers aunque arranque
+    sin el dialogo de crash recovery. Son dos cosas distintas.
+
+    Returns True si se modifico el archivo.
+    """
+    config_path = _get_we_config_path()
+    if not os.path.isfile(config_path):
+        return False
+
+    try:
+        with open(config_path, encoding='utf-8') as f:
+            config = json.load(f)
+
+        user = config.get("steamuser", {}).get("general", {}).get("user", {})
+        if user.get("safemode") is not True:
+            return False
+
+        user["safemode"] = False
+        tmp = config_path + ".tmp"
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(config, f, indent='\t')
+        os.replace(tmp, config_path)
+        return True
+    except (OSError, json.JSONDecodeError):
+        return False
+
+
+def pre_launch_cleanup() -> dict:
+    """Limpieza pre-lanzamiento: resetea flags de crash y safe mode.
+
+    Debe llamarse ANTES de launch(). Asegura que WE arranque sin el
+    dialogo "no se cerro correctamente" y con wallpapers renderizando.
+
+    Returns {'faultyShutdown': bool, 'safemode': bool}
+    """
+    return {
+        'faultyShutdown': reset_faulty_shutdown(),
+        'safemode': ensure_safemode_disabled(),
+    }
+
+
+def _try_graceful_shutdown(timeout: float = 5.0):
+    """Intenta cerrar la ventana de WE limpiamente via xdotool.
+
+    Si WE cierra su UI via WM_CLOSE, tiene oportunidad de ejecutar su
+    shutdown limpio y resetear faultyShutdown=0 por si mismo.
+    """
+    try:
+        r = subprocess.run(
+            ["xdotool", "search", "--name", "Wallpaper Engine"],
+            capture_output=True, text=True, timeout=3
+        )
+        if r.stdout.strip():
+            for wid in r.stdout.strip().split('\n'):
+                subprocess.run(
+                    ["xdotool", "windowclose", wid.strip()],
+                    capture_output=True, timeout=2
+                )
+            # Esperar a que cierre solo
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                if not is_service_running() and not is_ui_running():
+                    return True
+                time.sleep(0.3)
+    except Exception:
+        pass
+    return False
+
+
 # ── Utilidades de procesos ──────────────────────────────────────────────────
 
 def _find_wine_process(exe_name: str) -> list[dict]:
@@ -311,6 +431,13 @@ def launch(browse: bool = True, timeout: float = 60.0) -> WEStatus:
     Returns:
         WEStatus con el estado final.
     """
+    # 0. Limpiar flags de crash/safe mode ANTES de lanzar
+    cleanup = pre_launch_cleanup()
+    if cleanup['faultyShutdown']:
+        print("[RipoWall] Flag faultyShutdown reseteado (evita dialogo 'no se cerro bien').", flush=True)
+    if cleanup['safemode']:
+        print("[RipoWall] Safe mode desactivado en config.json.", flush=True)
+
     # 1. Validar entorno
     status = _validate_environment()
     if status.last_error:
@@ -473,8 +600,19 @@ def restart_ui() -> WEStatus:
 
 
 def kill() -> WEStatus:
-    """Detiene todos los procesos de Wallpaper Engine."""
+    """Detiene todos los procesos de Wallpaper Engine con shutdown limpio.
+
+    1. Intenta cerrar la ventana via xdotool (WM_CLOSE)
+    2. Espera a que los procesos terminen solos
+    3. Si no terminaron, SIGTERM → SIGKILL
+    4. Resetea faultyShutdown para que el proximo inicio sea limpio
+    """
     print("[RipoWall] Deteniendo Wallpaper Engine...", flush=True)
+
+    # 1. Intentar cierre limpio (xdotool WM_CLOSE a la UI)
+    _try_graceful_shutdown(timeout=5.0)
+
+    # 2. SIGTERM a lo que quede
     for exe in [WE_UI_EXE, WE_WALLPAPER_EXE, WE_SERVICE_EXE, WE_LAUNCHER_EXE]:
         for p in _find_wine_process(exe):
             try:
@@ -482,12 +620,19 @@ def kill() -> WEStatus:
             except OSError:
                 pass
     time.sleep(2)
+
+    # 3. SIGKILL a lo que sobreviva
     for exe in [WE_UI_EXE, WE_WALLPAPER_EXE, WE_SERVICE_EXE, WE_LAUNCHER_EXE]:
         for p in _find_wine_process(exe):
             try:
                 os.kill(p['pid'], signal.SIGKILL)
             except OSError:
                 pass
+    time.sleep(1)
+
+    # 4. Resetear flag faultyShutdown para que no muestre el dialogo
+    reset_faulty_shutdown()
+
     return get_status()
 
 
@@ -510,7 +655,8 @@ def monitor(interval: float = 5.0):
         try:
             s = get_status()
             if not s.service_running:
-                print("[RipoWall] Servicio detenido. Re-lanzando...", flush=True)
+                print("[RipoWall] Servicio detenido. Limpiando flags y re-lanzando...", flush=True)
+                pre_launch_cleanup()
                 launch(browse=True)
             elif not s.ui_running:
                 print("[RipoWall] UI caida. Reiniciando...", flush=True)

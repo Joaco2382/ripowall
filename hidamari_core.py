@@ -710,6 +710,26 @@ def _get_we_launcher():
     return _WE_LAUNCHER if _WE_LAUNCHER is not False else None
 
 
+def we_pre_launch_cleanup() -> dict:
+    """Limpia flags de crash/safe mode de WE antes de lanzar.
+
+    Evita el dialogo 'no se cerro correctamente' y asegura que
+    los wallpapers rendericen (safemode=false).
+    """
+    wel = _get_we_launcher()
+    if not wel:
+        return {'error': 'Modulo wallpaper_engine_launcher no disponible'}
+    return wel.pre_launch_cleanup()
+
+
+def we_reset_faulty_shutdown() -> bool:
+    """Resetea el flag faultyShutdown en el registro de Wine."""
+    wel = _get_we_launcher()
+    if not wel:
+        return False
+    return wel.reset_faulty_shutdown()
+
+
 def launch_wallpaper_engine(browse: bool = True) -> dict:
     """Lanza Wallpaper Engine via Steam/Proton de forma confiable.
 
