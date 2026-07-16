@@ -2,7 +2,7 @@
 # Contributor: RipoTech <hola@ripotech.cl>
 
 pkgname=ripowall
-pkgver=2.1.0
+pkgver=3.1.0
 pkgrel=1
 pkgdesc="Gestiona wallpapers animados en Linux integrando Wallpaper Engine (Steam/Proton) con Hidamari"
 arch=('any')

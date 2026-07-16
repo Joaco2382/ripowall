@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 *.txt
 *cache*
+/log.txt
+/wallpaperuilog.txt

@@ -16,7 +16,7 @@ ICONS_DIR="${HOME}/.local/share/icons"
 SYSTEMD_USER="${HOME}/.config/systemd/user"
 CONFIG_DIR="${HOME}/.config/hidamari"
 
-RIPOWALL_VERSION="2.1.0"
+RIPOWALL_VERSION="3.1.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo -e "${CYAN}${BOLD}═══ RipoWall v${RIPOWALL_VERSION} — Instalador ═══${RESET}"
@@ -49,28 +49,28 @@ install_deps() {
     case "$DISTRO" in
         arch)
             sudo pacman -S --needed --noconfirm \
-                python python-pydbus python-vlc python-setproctitle \
-                vlc yt-dlp libwnck3 webkit2gtk-4.1 \
+                python python-gobject python-pydbus python-vlc python-setproctitle \
+                vlc yt-dlp libwnck3 webkitgtk-6.0 \
                 gtk4 libadwaita steam 2>/dev/null || true
             ;;
         debian|ubuntu)
             sudo apt update
             sudo apt install -y \
                 python3 python3-pip python3-gi python3-dbus \
-                vlc yt-dlp libwnck-3-dev libwebkit2gtk-4.1-dev \
+                vlc yt-dlp libwnck-3-dev libwebkitgtk-6.0-dev \
                 libgtk-4-dev libadwaita-1-dev \
                 gir1.2-gtk-4.0 gir1.2-adw-1 steam-installer 2>/dev/null || true
             ;;
         fedora)
             sudo dnf install -y \
                 python3 python3-pip python3-gobject python3-dbus \
-                vlc yt-dlp libwnck3-devel webkit2gtk4.1-devel \
+                vlc yt-dlp libwnck3-devel webkitgtk6.0-devel \
                 gtk4-devel libadwaita-devel steam 2>/dev/null || true
             ;;
         suse)
             sudo zypper install -y \
                 python3 python3-pip python3-gobject python3-dbus-python \
-                vlc yt-dlp libwnck3-devel webkit2gtk4.1-devel \
+                vlc yt-dlp libwnck3-devel webkitgtk6.0-devel \
                 gtk4-devel libadwaita-devel steam 2>/dev/null || true
             ;;
         *)
