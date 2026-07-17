@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.join(os.path.expanduser("~"), ".local", "bin"))
 
 import gi
 gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
 gi.require_version("Adw", "1")
 gi.require_version("WebKit", "6.0")
 from gi.repository import Gtk, Adw, GLib, Gdk, Gio, GObject, WebKit
@@ -667,9 +668,13 @@ class RipoWallWindow(Adw.ApplicationWindow):
         label.set_label(item.title)
         preview = item.preview_path
         if preview and os.path.isfile(preview):
-            picture.set_filename(preview)
+            try:
+                texture = Gdk.Texture.new_from_filename(preview)
+                picture.set_paintable(texture)
+            except Exception:
+                picture.set_paintable(None)
         else:
-            picture.set_filename(None)
+            picture.set_paintable(None)
 
         # Guardar referencia al item para el click derecho
         box._wallpaper_item = item
@@ -1880,9 +1885,13 @@ class WorkshopBrowser(Adw.Dialog):
         stats_label.set_label(stats)
 
         if item.preview_path and os.path.isfile(item.preview_path):
-            picture.set_filename(item.preview_path)
+            try:
+                texture = Gdk.Texture.new_from_filename(item.preview_path)
+                picture.set_paintable(texture)
+            except Exception:
+                picture.set_paintable(None)
         else:
-            picture.set_filename(None)
+            picture.set_paintable(None)
 
         if item.is_subscribed:
             sub_btn.set_label("✓ Suscrito")
