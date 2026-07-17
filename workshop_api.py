@@ -93,7 +93,8 @@ class WorkshopItem:
     time_created: int = 0
     time_updated: int = 0
     is_subscribed: bool = False
-    is_mature: bool = False  # maybe_inappropriate_sex or _violence
+    age_rating: str = "everyone"  # everyone, partial_nudity, mature
+    content_descriptors: list[str] = field(default_factory=list)
 
     @property
     def size_mb(self) -> float:
@@ -253,6 +254,41 @@ def _log_error(msg: str) -> None:
     pass  # TODO: integrar con logging del daemon
 
 
+# Content descriptor IDs de Steam (EUserUGCContentDescriptorID)
+_DESCRIPTOR_LABELS: dict[int, str] = {
+    1: "Nudity or Sexual Content",
+    2: "Frequent Violence or Gore",
+    3: "Adult Only Sexual Content",
+    4: "Gratuitous Sexual Content",
+    5: "General Mature Content",
+}
+
+
+def _classify_age_rating(descriptor_ids: list[int], maybe_sex: bool) -> str:
+    """Clasifica un wallpaper segun sus content descriptors de Steam.
+
+    Logica igual a Wallpaper Engine:
+      - Mature (18+): descriptor 3 presente (Adult Only)
+      - Partial Nudity: descriptor 1 presente sin 3
+      - Everyone: sin descriptores relevantes
+    """
+    ids = set(descriptor_ids) if descriptor_ids else set()
+
+    if 3 in ids:
+        return "mature"
+    elif 1 in ids:
+        return "partial_nudity"
+    elif maybe_sex:
+        return "partial_nudity"
+    else:
+        return "everyone"
+
+
+def _get_content_descriptor_labels(descriptor_ids: list[int]) -> list[str]:
+    """Convierte IDs de content descriptors a etiquetas legibles."""
+    return [_DESCRIPTOR_LABELS.get(d, f"Unknown({d})") for d in (descriptor_ids or [])]
+
+
 def _parse_workshop_item(raw: dict) -> WorkshopItem:
     """Convierte un dict de respuesta de la API en un WorkshopItem."""
     tags = []
@@ -281,9 +317,12 @@ def _parse_workshop_item(raw: dict) -> WorkshopItem:
         tags=tags,
         time_created=int(raw.get("time_created", 0)),
         time_updated=int(raw.get("time_updated", 0)),
-        is_mature=(
-            raw.get("maybe_inappropriate_sex", False)
-            or raw.get("maybe_inappropriate_violence", False)
+        age_rating=_classify_age_rating(
+            raw.get("content_descriptorids", []),
+            raw.get("maybe_inappropriate_sex", False),
+        ),
+        content_descriptors=_get_content_descriptor_labels(
+            raw.get("content_descriptorids", [])
         ),
     )
 

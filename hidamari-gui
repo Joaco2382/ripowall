@@ -1372,15 +1372,16 @@ class WorkshopBrowser(Adw.Window):
 
     AGE_OPTIONS = [
         ("Todos", "all"),
-        ("Everyone (SFW)", "sfw"),
-        ("Mature (NSFW)", "mature"),
+        ("Everyone (SFW)", "everyone"),
+        ("Partial Nudity", "partial_nudity"),
+        ("Mature (18+)", "mature"),
     ]
 
     def __init__(self, parent: RipoWallWindow):
         super().__init__()
         self.set_transient_for(parent)
         self.set_title("Steam Workshop — Wallpaper Engine")
-        self.set_default_size(1200, 800)
+        self.set_default_size(1300, 850)
 
         # Estado interno
         self._store = Gio.ListStore.new(WorkshopCard.__gtype__)
@@ -1678,10 +1679,12 @@ class WorkshopBrowser(Adw.Window):
     def _filter_by_age(self, items: list[WA.WorkshopItem]) -> list[WA.WorkshopItem]:
         if self._age_filter == "all":
             return items
-        elif self._age_filter == "sfw":
-            return [i for i in items if not i.is_mature]
+        elif self._age_filter == "everyone":
+            return [i for i in items if i.age_rating == "everyone"]
+        elif self._age_filter == "partial_nudity":
+            return [i for i in items if i.age_rating in ("everyone", "partial_nudity")]
         elif self._age_filter == "mature":
-            return [i for i in items if i.is_mature]
+            return items  # mostrar todo (everyone + partial + mature)
         return items
 
     # ── Carga de contenido ──────────────────────────────────────────────
@@ -1868,13 +1871,13 @@ class WorkshopBrowser(Adw.Window):
 
         picture = Gtk.Picture()
         picture.set_content_fit(Gtk.ContentFit.COVER)
-        picture.set_size_request(160, 130)
+        picture.set_size_request(130, 105)
         picture.add_css_class("card-picture")
         box.append(picture)
 
         title = Gtk.Label()
         title.set_ellipsize(3)
-        title.set_max_width_chars(18)
+        title.set_max_width_chars(14)
         title.set_halign(Gtk.Align.START)
         title.add_css_class("card-label")
         box.append(title)
