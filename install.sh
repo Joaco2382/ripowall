@@ -164,7 +164,7 @@ EOF
     done
 
     # Desktop entry
-    cat > "$APPS_DIR/ripowall.desktop" << EOF
+    cat > "$APPS_DIR/cl.ripotech.RipoWall.desktop" << EOF
 [Desktop Entry]
 Type=Application
 Name=RipoWall
@@ -176,7 +176,7 @@ StartupNotify=true
 Terminal=false
 Keywords=wallpaper;animated;live;video;steam;workshop;
 EOF
-    echo -e "  ${GREEN}✓${RESET} ripowall.desktop → $APPS_DIR/"
+    echo -e "  ${GREEN}✓${RESET} cl.ripotech.RipoWall.desktop → $APPS_DIR/"
 }
 
 # ── Habilitar daemon ────────────────────────────────────────────────────

@@ -1734,12 +1734,16 @@ class WorkshopBrowser(Adw.Dialog):
                 GLib.idle_add(lambda idx=i, p=local_path: self._update_card_preview(idx, p))
 
     def _update_card_preview(self, idx: int, path: str):
-        if idx < self._store.get_n_items():
-            card = self._store.get_item(idx)
-            if card and card.preview_path != path:
-                card.preview_path = path
-                # splice fuerza re-bind del GridView
-                self._store.splice(idx, 1, [card])
+        """Notifica al GridView que el preview del item cambio."""
+        if idx >= self._store.get_n_items():
+            return
+        card = self._store.get_item(idx)
+        if card is None or card.preview_path == path:
+            return
+        card.preview_path = path
+        # items_changed + notify fuerza re-bind de la fila en GTK4
+        card.notify("preview_path")
+        self._store.items_changed(idx, 1, 1)
 
     def _show_error(self, msg: str):
         self._error_label.set_label(msg)
@@ -1929,26 +1933,16 @@ class RipoWallApp(Adw.Application):
         self._add_action("rotate", self._on_rotate_action, ["<Control>r"])
 
     def _set_app_icon(self):
-        """Registra ripowall como icono de la app en todos los niveles."""
-        # 1. Icono para ventanas GTK
-        icon_theme = Gtk.IconTheme.get_for_display(Gdk.Display.get_default())
-        if icon_theme and icon_theme.has_icon("ripowall"):
-            Gtk.Window.set_default_icon_name("ripowall")
-        else:
-            # Fallback: path directo al PNG
-            icon_path = os.path.expanduser("~/.local/share/icons/ripowall.png")
-            if os.path.isfile(icon_path):
-                try:
-                    texture = Gdk.Texture.new_from_filename(icon_path)
-                    if texture:
-                        Gtk.Window.set_default_icon_name("ripowall")
-                except Exception:
-                    pass
-        # 2. Icono para el shell/desktop (Wayland xdg-shell)
-        try:
-            self.set_icon_name("ripowall")
-        except Exception:
-            pass
+        """Registra ripowall como icono de la app en todos los niveles.
+
+        Wayland (GNOME Shell): el icono del toplevel se define via el archivo
+        .desktop cuyo nombre DEBE coincidir con application_id.
+        El archivo es: ~/.local/share/applications/cl.ripotech.RipoWall.desktop
+        """
+        # GTK windows (afecta dialogos, about, y X11 fallback)
+        Gtk.Window.set_default_icon_name("ripowall")
+        # Wayland xdg-shell toplevel (requiere desktop file con nombre correcto)
+        self.set_icon_name("ripowall")
 
     def _add_action(
         self, name: str, callback, accels: list[str] | None = None
