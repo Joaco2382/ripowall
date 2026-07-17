@@ -1370,9 +1370,8 @@ class WorkshopBrowser(Adw.Window):
         ("Actualizados", "updated"),
     ]
 
-    AGE_OPTIONS = [
-        ("Todos", "all"),
-        ("Everyone (SFW)", "everyone"),
+    AGE_CHECKBOXES = [
+        ("Everyone", "everyone"),
         ("Partial Nudity", "partial_nudity"),
         ("Mature (18+)", "mature"),
     ]
@@ -1386,14 +1385,11 @@ class WorkshopBrowser(Adw.Window):
         # Estado interno
         self._store = Gio.ListStore.new(WorkshopCard.__gtype__)
         self._raw_items: list[WA.WorkshopItem] = []
-        self._current_page = 1
-        self._total_pages = 1
         self._current_sort = "trending"
         self._current_query = ""
-        self._cursor = "*"
         self._search_timer: int = 0
         self._tags: list[str] = []
-        self._age_filter = "all"
+        self._age_checkboxes: dict[str, Gtk.CheckButton] = {}
 
         self._build_ui()
         self._load_trending_tags()
@@ -1471,19 +1467,18 @@ class WorkshopBrowser(Adw.Window):
         self._sort_dropdown.connect("notify::selected", self._on_sort_changed)
         sidebar.append(self._sort_dropdown)
 
-        # Edad
-        age_label = Gtk.Label(label="Clasificacion", xalign=0)
+        # Age rating — checkboxes como Wallpaper Engine
+        age_label = Gtk.Label(label="Clasificacion de edad", xalign=0)
         age_label.add_css_class("sidebar-heading")
         age_label.set_margin_top(12)
         sidebar.append(age_label)
 
-        age_strings = Gtk.StringList()
-        for label, _key in self.AGE_OPTIONS:
-            age_strings.append(label)
-        self._age_dropdown = Gtk.DropDown.new(age_strings)
-        self._age_dropdown.set_tooltip_text("Filtrar por clasificacion de edad")
-        self._age_dropdown.connect("notify::selected", self._on_age_changed)
-        sidebar.append(self._age_dropdown)
+        self._age_checkboxes: dict[str, Gtk.CheckButton] = {}
+        for label, key in self.AGE_CHECKBOXES:
+            cb = Gtk.CheckButton.new_with_label(label)
+            cb.set_active(True)  # mostrar todo por defecto
+            self._age_checkboxes[key] = cb
+            sidebar.append(cb)
 
         # Tags (multi-select)
         tags_label = Gtk.Label(label="Tags (multi-select)", xalign=0)
@@ -1582,22 +1577,15 @@ class WorkshopBrowser(Adw.Window):
 
         content.append(self._stack)
 
-        # Pagination
-        page_bar = Gtk.Box(
-            orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+        # Status bar (conteo de wallpapers)
+        status_bar = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
             halign=Gtk.Align.CENTER, margin_top=4, margin_bottom=6
         )
-        self._prev_btn = Gtk.Button.new_from_icon_name("go-previous-symbolic")
-        self._prev_btn.set_sensitive(False)
-        self._prev_btn.connect("clicked", lambda b: self._go_page(-1))
-        self._page_label = Gtk.Label(label="Pagina 1 de 1")
-        self._next_btn = Gtk.Button.new_from_icon_name("go-next-symbolic")
-        self._next_btn.set_sensitive(False)
-        self._next_btn.connect("clicked", lambda b: self._go_page(1))
-        page_bar.append(self._prev_btn)
-        page_bar.append(self._page_label)
-        page_bar.append(self._next_btn)
-        content.append(page_bar)
+        self._page_label = Gtk.Label(label="")
+        self._page_label.add_css_class("dim-label")
+        status_bar.append(self._page_label)
+        content.append(status_bar)
 
         return content
 
@@ -1610,8 +1598,6 @@ class WorkshopBrowser(Adw.Window):
 
     def _do_search(self, query: str):
         self._current_query = query
-        self._current_page = 1
-        self._cursor = "*"
         self._load_content()
         self._search_timer = 0
         return False
@@ -1620,16 +1606,7 @@ class WorkshopBrowser(Adw.Window):
         idx = dropdown.get_selected()
         if 0 <= idx < len(self.SORT_OPTIONS):
             self._current_sort = self.SORT_OPTIONS[idx][1]
-            self._current_page = 1
-            self._cursor = "*"
             self._load_content()
-
-    def _on_age_changed(self, dropdown, _pspec):
-        idx = dropdown.get_selected()
-        if 0 <= idx < len(self.AGE_OPTIONS):
-            self._age_filter = self.AGE_OPTIONS[idx][1]
-            # Re-filtrar sin re-consultar la API
-            GLib.idle_add(self._apply_age_filter)
 
     def _on_tag_clicked(self, btn: Gtk.ToggleButton, tag: str):
         """Acumula tags sin recargar. El usuario debe hacer clic en 'Aplicar'."""
@@ -1640,16 +1617,7 @@ class WorkshopBrowser(Adw.Window):
             self._tags = [t for t in self._tags if t != tag]
 
     def _on_apply_filters(self, btn: Gtk.Button):
-        """Aplica todos los filtros acumulados y recarga."""
-        self._current_page = 1
-        self._cursor = "*"
-        self._load_content()
-
-    def _go_page(self, delta: int):
-        new_page = self._current_page + delta
-        if new_page < 1 or new_page > self._total_pages:
-            return
-        self._current_page = new_page
+        """Aplica todos los filtros acumulados (tags + edad) y recarga."""
         self._load_content()
 
     def _on_login_clicked(self, btn: Gtk.Button):
@@ -1665,7 +1633,7 @@ class WorkshopBrowser(Adw.Window):
     # ── Age filter client-side ──────────────────────────────────────────
 
     def _apply_age_filter(self):
-        """Re-filtra _raw_items segun _age_filter y actualiza el store."""
+        """Re-filtra _raw_items segun checkboxes de edad."""
         filtered = self._filter_by_age(self._raw_items)
         if not filtered:
             self._stack.set_visible_child_name("empty")
@@ -1674,18 +1642,17 @@ class WorkshopBrowser(Adw.Window):
         cards = [WorkshopCard(item, "") for item in filtered]
         self._store.splice(0, n, cards)
         self._stack.set_visible_child_name("grid")
+        self._page_label.set_label(f"{len(filtered)} wallpapers")
         threading.Thread(target=self._download_previews, daemon=True).start()
 
     def _filter_by_age(self, items: list[WA.WorkshopItem]) -> list[WA.WorkshopItem]:
-        if self._age_filter == "all":
-            return items
-        elif self._age_filter == "everyone":
-            return [i for i in items if i.age_rating == "everyone"]
-        elif self._age_filter == "partial_nudity":
-            return [i for i in items if i.age_rating in ("everyone", "partial_nudity")]
-        elif self._age_filter == "mature":
-            return items  # mostrar todo (everyone + partial + mature)
-        return items
+        """Filtra segun checkboxes de edad (como WE)."""
+        enabled = {k for k, cb in self._age_checkboxes.items() if cb.get_active()}
+        if not enabled:
+            return []  # nada seleccionado = sin resultados
+        if len(enabled) == len(self.AGE_CHECKBOXES):
+            return items  # todos activados = mostrar todo
+        return [i for i in items if i.age_rating in enabled]
 
     # ── Carga de contenido ──────────────────────────────────────────────
 
@@ -1694,50 +1661,36 @@ class WorkshopBrowser(Adw.Window):
         threading.Thread(target=self._load_content_worker, daemon=True).start()
 
     def _load_content_worker(self):
-        self._prev_btn.set_sensitive(False)
-        self._next_btn.set_sensitive(False)
-
         try:
-            filetype = WA.FILE_TYPE_ALL
             tags = self._tags if self._tags else None
-
-            if self._current_query.strip():
-                result = WA.search_by_text(
-                    self._current_query, page=self._current_page
-                )
-            else:
-                result = WA.search_workshop(
-                    sort=self._current_sort,
-                    page=self._current_page,
-                    filetype=filetype,
-                    tags=tags,
-                    cursor=self._cursor,
-                )
+            items = WA.search_multi(
+                query=self._current_query,
+                sort=self._current_sort,
+                tags=tags,
+                target_count=300,
+            )
         except Exception as e:
             GLib.idle_add(self._show_error, f"Error de red: {e}")
             return
 
-        if result is None:
+        if not items:
             GLib.idle_add(self._show_error, "No se pudo conectar a la API de Steam")
             return
 
-        self._cursor = result.next_cursor
-        self._total_pages = result.pages
-
         # Marcar items ya suscritos + guardar raw
         local_ids = self._get_subscribed_ids()
-        for item in result.items:
+        for item in items:
             if item.publishedfileid in local_ids:
                 item.is_subscribed = True
-        self._raw_items = result.items
+        self._raw_items = items
 
-        GLib.idle_add(self._display_results, result)
+        GLib.idle_add(self._display_results, items)
 
-    def _display_results(self, result: WA.SearchResult):
-        self._current_items = result.items
+    def _display_results(self, items: list[WA.WorkshopItem]):
+        self._current_items = items
 
         # Aplicar filtro de edad
-        filtered = self._filter_by_age(result.items)
+        filtered = self._filter_by_age(items)
 
         n = self._store.get_n_items()
         cards = [WorkshopCard(item, "") for item in filtered]
@@ -1746,12 +1699,8 @@ class WorkshopBrowser(Adw.Window):
         # Descargar previews en background
         threading.Thread(target=self._download_previews, daemon=True).start()
 
-        # Paginacion
-        self._page_label.set_label(
-            f"Pagina {result.page} de {result.pages}"
-        )
-        self._prev_btn.set_sensitive(result.page > 1)
-        self._next_btn.set_sensitive(result.page < result.pages)
+        count_label = f"{len(filtered)} wallpapers"
+        self._page_label.set_label(count_label)
 
         if len(filtered) == 0:
             self._stack.set_visible_child_name("empty")
@@ -1787,8 +1736,6 @@ class WorkshopBrowser(Adw.Window):
     def _show_error(self, msg: str):
         self._error_label.set_label(msg)
         self._stack.set_visible_child_name("error")
-        self._prev_btn.set_sensitive(False)
-        self._next_btn.set_sensitive(False)
 
     def _get_subscribed_ids(self) -> set[str]:
         try:

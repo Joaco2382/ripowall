@@ -336,7 +336,7 @@ def search_workshop(
     filetype: int = FILE_TYPE_VIDEO,
     sort: str = "trending",
     page: int = 1,
-    per_page: int = 30,
+    per_page: int = 100,
     cursor: str = "*",
 ) -> SearchResult | None:
     """Busca wallpapers en el Workshop de Wallpaper Engine.
@@ -347,7 +347,7 @@ def search_workshop(
         filetype: EPublishedFileInfoMatchingFileType (3 = Videos, 0 = Todos).
         sort: trending, popular, recent, updated, text_search.
         page: Página (solo cosmético, la API usa cursor).
-        per_page: Resultados por página (máx ~100).
+        per_page: Resultados por página (máx 100, impuesto por Steam API).
         cursor: Cursor de paginación (* = primera página).
 
     Returns:
@@ -471,29 +471,115 @@ def get_wallpaper_details(publishedfileid: str) -> WorkshopItem | None:
         return None
 
 
-def get_trending(page: int = 1, per_page: int = 30) -> SearchResult | None:
-    """Wallpapers en tendencia."""
+def get_trending(page: int = 1, per_page: int = 100) -> SearchResult | None:
     return search_workshop(sort="trending", page=page, per_page=per_page)
 
 
-def get_popular(page: int = 1, per_page: int = 30) -> SearchResult | None:
-    """Wallpapers más populares (más suscripciones)."""
+def get_popular(page: int = 1, per_page: int = 100) -> SearchResult | None:
     return search_workshop(sort="popular", page=page, per_page=per_page)
 
 
-def get_recent(page: int = 1, per_page: int = 30) -> SearchResult | None:
-    """Wallpapers más recientes."""
+def get_recent(page: int = 1, per_page: int = 100) -> SearchResult | None:
     return search_workshop(sort="recent", page=page, per_page=per_page)
 
 
-def get_updated(page: int = 1, per_page: int = 30) -> SearchResult | None:
-    """Wallpapers actualizados recientemente."""
+def get_updated(page: int = 1, per_page: int = 100) -> SearchResult | None:
     return search_workshop(sort="updated", page=page, per_page=per_page)
 
 
-def search_by_text(query: str, page: int = 1, per_page: int = 30) -> SearchResult | None:
-    """Busca wallpapers por texto."""
+def search_by_text(query: str, page: int = 1, per_page: int = 100) -> SearchResult | None:
     return search_workshop(query=query, sort="text_search", page=page, per_page=per_page)
+
+
+def search_multi(
+    query: str = "",
+    tags: list[str] | None = None,
+    sort: str = "trending",
+    target_count: int = 300,
+) -> list[WorkshopItem]:
+    """Busca wallpapers concatenando multiples paginas de la API.
+
+    La Steam API limita a 100 items por request. Esta funcion
+    encadena hasta 4 paginas para alcanzar ~300 items.
+
+    Args:
+        query: Texto de busqueda.
+        tags: Tags requeridos.
+        sort: Ordenamiento.
+        target_count: Cantidad objetivo de items (default 300).
+
+    Returns:
+        Lista plana de WorkshopItem (sin paginacion).
+    """
+    api_key = _get_api_key()
+    if not api_key:
+        _log_error("search_multi: no hay API key configurada")
+        return []
+
+    all_items: list[WorkshopItem] = []
+    seen: set[str] = set()
+    cursor = "*"
+    pages_to_fetch = max(1, (target_count + 99) // 100)  # ceil(target/100)
+
+    for page_num in range(1, pages_to_fetch + 1):
+        query_type = {
+            "trending": QUERY_RANKED_BY_TREND,
+            "popular": QUERY_RANKED_BY_SUBSCRIPTIONS,
+            "recent": QUERY_RANKED_BY_DATE,
+            "updated": QUERY_RANKED_BY_LAST_UPDATED,
+            "text_search": QUERY_RANKED_BY_TEXT_SEARCH,
+        }.get(sort, QUERY_RANKED_BY_TREND)
+
+        if query.strip():
+            query_type = QUERY_RANKED_BY_TEXT_SEARCH
+
+        params: dict[str, str | int] = {
+            "key": api_key,
+            "query_type": query_type,
+            "page": page_num,
+            "cursor": cursor,
+            "numperpage": 100,
+            "creator_appid": WORKSHOP_APPID,
+            "appid": WORKSHOP_APPID,
+            "return_vote_data": "true",
+            "return_tags": "true",
+            "return_previews": "true",
+            "return_short_description": "true",
+        }
+
+        if tags:
+            params["requiredtags"] = ",".join(tags)
+            params["match_all_tags"] = "true"
+
+        if query.strip():
+            params["search_text"] = query.strip()
+
+        url = f"{STEAM_API_BASE}/IPublishedFileService/QueryFiles/v1/?" + urllib.parse.urlencode(params)
+        data = _http_get(url)
+        if data is None:
+            break
+
+        try:
+            resp = data.get("response", {})
+            raw_items = resp.get("publishedfiledetails", [])
+            for raw in raw_items:
+                item = _parse_workshop_item(raw)
+                if item.publishedfileid not in seen:
+                    seen.add(item.publishedfileid)
+                    all_items.append(item)
+
+            next_cursor = resp.get("next_cursor", "")
+            if not next_cursor or next_cursor == cursor:
+                break
+            cursor = next_cursor
+
+            if len(raw_items) < 100:
+                break  # ultima pagina
+        except Exception as e:
+            _log_error(f"Error en search_multi pagina {page_num}: {e}")
+            break
+
+    return all_items
 
 
 def download_preview(url: str, publishedfileid: str) -> str | None:
