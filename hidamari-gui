@@ -1752,9 +1752,11 @@ class WorkshopBrowser(Adw.Dialog):
         if card is None or card.preview_path == path:
             return
         card.preview_path = path
-        # items_changed + notify fuerza re-bind de la fila en GTK4
-        card.notify("preview_path")
-        self._store.items_changed(idx, 1, 1)
+        # remove + insert es la UNICA forma de forzar re-bind en GTK4.
+        # splice/items_changed con mismo objeto = no-op (compara punteros).
+        # El GridView necesita que GtkListItem.item pase a NULL y vuelva.
+        self._store.remove(idx)
+        self._store.insert(idx, card)
 
     def _show_error(self, msg: str):
         self._error_label.set_label(msg)
