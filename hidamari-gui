@@ -69,11 +69,57 @@ APP_CSS = """
 }
 .card-picture {
     border-radius: 8px;
-    background: black;
+    background: alpha(%(accent)s, 0.08);
 }
 .card-label {
     font-size: 11px;
     margin-top: 4px;
+}
+.card-stats {
+    font-size: 10px;
+    margin-top: 0;
+}
+.card-sub-btn {
+    font-size: 10px;
+    padding: 2px 8px;
+    margin-top: 4px;
+    border-radius: 6px;
+}
+/* Filtros del Workshop */
+.filter-chip {
+    border-radius: 20px;
+    padding: 4px 14px;
+    font-size: 12px;
+    min-height: 28px;
+    transition: background 150ms ease;
+}
+.filter-chip:checked {
+    background: %(accent)s;
+    color: white;
+    font-weight: bold;
+}
+.filter-chip:not(:checked) {
+    background: alpha(@card_bg_color, 0.08);
+    color: @insensitive_fg_color;
+}
+.filter-chip:hover {
+    background: alpha(%(accent)s, 0.2);
+}
+.filter-dropdown {
+    min-height: 28px;
+    font-size: 12px;
+}
+.filter-dropdown > button {
+    border-radius: 8px;
+    padding: 2px 10px;
+    font-size: 12px;
+}
+.tag-chip {
+    border-radius: 20px;
+    padding: 2px 12px;
+    font-size: 11px;
+    margin: 2px;
+    transition: background 150ms ease;
 }
 .monitor-row {
     padding: 6px 6px;
@@ -1420,6 +1466,7 @@ class WorkshopBrowser(Adw.Dialog):
         for label, _key in self.SORT_OPTIONS:
             sort_strings.append(label)
         self._sort_dropdown = Gtk.DropDown.new(sort_strings)
+        self._sort_dropdown.add_css_class("filter-dropdown")
         self._sort_dropdown.connect("notify::selected", self._on_sort_changed)
         filter_bar.append(self._sort_dropdown)
 
@@ -1431,10 +1478,12 @@ class WorkshopBrowser(Adw.Dialog):
 
         self._filetype_video = Gtk.ToggleButton.new_with_label("Video")
         self._filetype_video.set_active(True)
+        self._filetype_video.add_css_class("filter-chip")
         self._filetype_video.connect("toggled", self._on_filetype_changed)
         filter_bar.append(self._filetype_video)
 
         self._filetype_all = Gtk.ToggleButton.new_with_label("Todos")
+        self._filetype_all.add_css_class("filter-chip")
         self._filetype_all.connect("toggled", self._on_filetype_changed)
         filter_bar.append(self._filetype_all)
 
@@ -1647,17 +1696,20 @@ class WorkshopBrowser(Adw.Dialog):
         GLib.idle_add(self._display_results, result)
 
     def _display_results(self, result: WA.SearchResult):
-        # Descargar previews en background
-        threading.Thread(
-            target=self._download_previews, args=(result.items,), daemon=True
-        ).start()
+        # Guardar los WorkshopItems para que _download_previews los acceda
+        self._current_items = result.items
 
         n = self._store.get_n_items()
         cards = [
-            WorkshopCard(item, item.preview_url)
+            WorkshopCard(item, "")  # preview_path vacio, se llena en background
             for item in result.items
         ]
         self._store.splice(0, n, cards)
+
+        # Descargar previews en background
+        threading.Thread(
+            target=self._download_previews, daemon=True
+        ).start()
 
         # Actualizar paginacion
         self._page_label.set_label(
@@ -1671,14 +1723,15 @@ class WorkshopBrowser(Adw.Dialog):
         else:
             self._stack.set_visible_child_name("grid")
 
-    def _download_previews(self, items: list[WA.WorkshopItem]):
+    def _download_previews(self):
         """Descarga previews en background y actualiza el store via idle_add."""
+        items = getattr(self, '_current_items', [])
         for i, item in enumerate(items):
             if not item.preview_url:
                 continue
             local_path = WA.download_preview(item.preview_url, item.publishedfileid)
             if local_path:
-                GLib.idle_add(self._update_card_preview, i, local_path)
+                GLib.idle_add(lambda idx=i, p=local_path: self._update_card_preview(idx, p))
 
     def _update_card_preview(self, idx: int, path: str):
         if idx < self._store.get_n_items():
@@ -1793,10 +1846,16 @@ class WorkshopBrowser(Adw.Dialog):
         stats = Gtk.Label()
         stats.set_ellipsize(3)
         stats.set_halign(Gtk.Align.START)
-        stats.add_css_class("card-label")
+        stats.add_css_class("card-stats")
         stats.add_css_class("dim-label")
-        stats.set_margin_top(0)
         box.append(stats)
+
+        sub_btn = Gtk.Button.new_with_label("Suscribirse")
+        sub_btn.add_css_class("card-sub-btn")
+        sub_btn.add_css_class("suggested-action")
+        sub_btn.set_halign(Gtk.Align.CENTER)
+        sub_btn.connect("clicked", self._on_card_sub_clicked)
+        box.append(sub_btn)
 
         list_item.set_child(box)
 
@@ -1805,6 +1864,7 @@ class WorkshopBrowser(Adw.Dialog):
         picture = box.get_first_child()
         title_label = picture.get_next_sibling()
         stats_label = title_label.get_next_sibling()
+        sub_btn = stats_label.get_next_sibling()
 
         item = list_item.get_item()
         if item is None:
@@ -1813,8 +1873,6 @@ class WorkshopBrowser(Adw.Dialog):
         title_label.set_label(item.title)
 
         stats = f"⭐ {item.subscriptions:,}  ❤ {item.favorited:,}"
-        if item.is_subscribed:
-            stats += "  [✓ Suscrito]"
         stats_label.set_label(stats)
 
         if item.preview_path and os.path.isfile(item.preview_path):
@@ -1822,7 +1880,22 @@ class WorkshopBrowser(Adw.Dialog):
         else:
             picture.set_filename(None)
 
+        if item.is_subscribed:
+            sub_btn.set_label("✓ Suscrito")
+            sub_btn.remove_css_class("suggested-action")
+            sub_btn.add_css_class("flat")
+        else:
+            sub_btn.set_label("Suscribirse")
+            sub_btn.remove_css_class("flat")
+            sub_btn.add_css_class("suggested-action")
+
         box._workshop_item = item
+
+    def _on_card_sub_clicked(self, btn: Gtk.Button):
+        box = btn.get_parent()
+        item = getattr(box, '_workshop_item', None)
+        if item:
+            self._toggle_subscribe(item)
 
 
 # ---------------------------------------------------------------------------
@@ -1856,11 +1929,24 @@ class RipoWallApp(Adw.Application):
         self._add_action("rotate", self._on_rotate_action, ["<Control>r"])
 
     def _set_app_icon(self):
-        """Registra ripowall como icono de la app (busca en hicolor theme)."""
+        """Registra ripowall como icono de la app en todos los niveles."""
+        # 1. Icono para ventanas GTK
+        icon_theme = Gtk.IconTheme.get_for_display(Gdk.Display.get_default())
+        if icon_theme and icon_theme.has_icon("ripowall"):
+            Gtk.Window.set_default_icon_name("ripowall")
+        else:
+            # Fallback: path directo al PNG
+            icon_path = os.path.expanduser("~/.local/share/icons/ripowall.png")
+            if os.path.isfile(icon_path):
+                try:
+                    texture = Gdk.Texture.new_from_filename(icon_path)
+                    if texture:
+                        Gtk.Window.set_default_icon_name("ripowall")
+                except Exception:
+                    pass
+        # 2. Icono para el shell/desktop (Wayland xdg-shell)
         try:
-            icon_theme = Gtk.IconTheme.get_for_display(Gdk.Display.get_default())
-            if icon_theme and icon_theme.has_icon("ripowall"):
-                Gtk.Window.set_default_icon_name("ripowall")
+            self.set_icon_name("ripowall")
         except Exception:
             pass
 
