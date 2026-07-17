@@ -93,6 +93,7 @@ class WorkshopItem:
     time_created: int = 0
     time_updated: int = 0
     is_subscribed: bool = False
+    is_mature: bool = False  # maybe_inappropriate_sex or _violence
 
     @property
     def size_mb(self) -> float:
@@ -280,6 +281,10 @@ def _parse_workshop_item(raw: dict) -> WorkshopItem:
         tags=tags,
         time_created=int(raw.get("time_created", 0)),
         time_updated=int(raw.get("time_updated", 0)),
+        is_mature=(
+            raw.get("maybe_inappropriate_sex", False)
+            or raw.get("maybe_inappropriate_violence", False)
+        ),
     )
 
 

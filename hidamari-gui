@@ -86,41 +86,9 @@ APP_CSS = """
     margin-top: 4px;
     border-radius: 6px;
 }
-/* Filtros del Workshop */
-.filter-chip {
-    border-radius: 20px;
-    padding: 4px 14px;
-    font-size: 12px;
-    min-height: 28px;
-    transition: background 150ms ease;
-}
-.filter-chip:checked {
-    background: %(accent)s;
-    color: white;
-    font-weight: bold;
-}
-.filter-chip:not(:checked) {
-    background: alpha(@card_bg_color, 0.08);
-    color: @insensitive_fg_color;
-}
-.filter-chip:hover {
-    background: alpha(%(accent)s, 0.2);
-}
-.filter-dropdown {
-    min-height: 28px;
-    font-size: 12px;
-}
-.filter-dropdown > button {
-    border-radius: 8px;
-    padding: 2px 10px;
-    font-size: 12px;
-}
-.tag-chip {
-    border-radius: 20px;
-    padding: 2px 12px;
-    font-size: 11px;
-    margin: 2px;
-    transition: background 150ms ease;
+.tags-flow {
+    background: alpha(@card_bg_color, 0.04);
+    padding: 2px 4px;
 }
 .monitor-row {
     padding: 6px 6px;
@@ -1166,7 +1134,7 @@ class RipoWallWindow(Adw.ApplicationWindow):
                 return
 
             dialog = WorkshopBrowser(self)
-            dialog.present(self)
+            dialog.present()
         except Exception as e:
             self._show_error(f"Error al abrir Workshop: {e}")
 
@@ -1385,14 +1353,14 @@ class SteamLoginDialog(Adw.Dialog):
 
 
 # ---------------------------------------------------------------------------
-# WorkshopBrowser — UI nativa GTK4 del Steam Workshop
+# WorkshopBrowser — ventana completa GTK4 nativa del Steam Workshop
 # ---------------------------------------------------------------------------
 
-class WorkshopBrowser(Adw.Dialog):
-    """Navegador nativo del Steam Workshop usando la Steam Web API.
+class WorkshopBrowser(Adw.Window):
+    """Ventana independiente del Steam Workshop usando la Steam Web API.
 
-    UI 100% GTK4 + Adwaita. Usa workshop_api para buscar,
-    filtrar y suscribirse. Solo requiere WebView para el login inicial.
+    UI 100% GTK4 + Adwaita. Filtros compactos en headerbar,
+    age rating, busqueda, GridView con thumbnails.
     """
 
     SORT_OPTIONS = [
@@ -1402,16 +1370,21 @@ class WorkshopBrowser(Adw.Dialog):
         ("Actualizados", "updated"),
     ]
 
+    AGE_OPTIONS = [
+        ("Todos", "all"),
+        ("Everyone (SFW)", "sfw"),
+        ("Mature (NSFW)", "mature"),
+    ]
+
     def __init__(self, parent: RipoWallWindow):
         super().__init__()
-        self._parent = parent
-
+        self.set_transient_for(parent)
         self.set_title("Steam Workshop — Wallpaper Engine")
-        self.set_content_width(1100)
-        self.set_content_height(750)
+        self.set_default_size(1200, 800)
 
         # Estado interno
         self._store = Gio.ListStore.new(WorkshopCard.__gtype__)
+        self._raw_items: list[WA.WorkshopItem] = []
         self._current_page = 1
         self._total_pages = 1
         self._current_sort = "trending"
@@ -1419,6 +1392,7 @@ class WorkshopBrowser(Adw.Dialog):
         self._cursor = "*"
         self._search_timer: int = 0
         self._tags: list[str] = []
+        self._age_filter = "all"
 
         self._build_ui()
         self._load_trending_tags()
@@ -1427,82 +1401,61 @@ class WorkshopBrowser(Adw.Dialog):
     def _build_ui(self):
         toolbar = Adw.ToolbarView()
 
-        # ── Header ────────────────────────────────────────────────────
+        # ── HeaderBar con filtros integrados ──────────────────────────
         header = Adw.HeaderBar()
         header.set_show_title(False)
 
-        # Search entry en el header
+        # Search entry
         self._search_entry = Gtk.SearchEntry()
         self._search_entry.set_placeholder_text("Buscar wallpapers...")
-        self._search_entry.set_width_chars(30)
+        self._search_entry.set_width_chars(28)
         self._search_entry.connect("search-changed", self._on_search_changed)
         header.set_title_widget(self._search_entry)
 
-        # Boton: abrir en navegador externo (fallback)
+        # Age rating dropdown
+        age_strings = Gtk.StringList()
+        for label, _key in self.AGE_OPTIONS:
+            age_strings.append(label)
+        self._age_dropdown = Gtk.DropDown.new(age_strings)
+        self._age_dropdown.set_tooltip_text("Filtrar por clasificacion de edad")
+        self._age_dropdown.connect("notify::selected", self._on_age_changed)
+        header.pack_end(self._age_dropdown)
+
+        # Sort dropdown
+        sort_strings = Gtk.StringList()
+        for label, _key in self.SORT_OPTIONS:
+            sort_strings.append(label)
+        self._sort_dropdown = Gtk.DropDown.new(sort_strings)
+        self._sort_dropdown.set_tooltip_text("Ordenar resultados")
+        self._sort_dropdown.connect("notify::selected", self._on_sort_changed)
+        header.pack_end(self._sort_dropdown)
+
+        # Login Steam
+        self._login_btn = Gtk.Button.new_with_label("Login")
+        self._login_btn.set_tooltip_text("Iniciar sesion en Steam para suscribirse")
+        self._login_btn.connect("clicked", self._on_login_clicked)
+        header.pack_end(self._login_btn)
+
+        # Abrir en navegador externo
         ext_btn = Gtk.Button.new_from_icon_name("web-browser-symbolic")
         ext_btn.set_tooltip_text("Abrir en navegador externo")
         ext_btn.connect("clicked", lambda b: subprocess.run(
             ["xdg-open", WORKSHOP_URL], start_new_session=True))
         header.pack_end(ext_btn)
 
-        # Boton: login Steam
-        self._login_btn = Gtk.Button.new_with_label("Login")
-        self._login_btn.set_tooltip_text("Iniciar sesion en Steam para suscribirse")
-        self._login_btn.connect("clicked", self._on_login_clicked)
-        header.pack_end(self._login_btn)
-
-        close_btn = Gtk.Button.new_with_label("Cerrar")
-        close_btn.connect("clicked", lambda b: self.close())
-        header.pack_end(close_btn)
-
         toolbar.add_top_bar(header)
 
         # ── Contenido ─────────────────────────────────────────────────
-        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
 
-        # Filtros: sort dropdown
-        filter_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        filter_bar.set_margin_start(12)
-        filter_bar.set_margin_end(12)
-        filter_bar.set_margin_top(6)
-
-        sort_label = Gtk.Label(label="Ordenar:")
-        sort_label.add_css_class("dim-label")
-        filter_bar.append(sort_label)
-
-        sort_strings = Gtk.StringList()
-        for label, _key in self.SORT_OPTIONS:
-            sort_strings.append(label)
-        self._sort_dropdown = Gtk.DropDown.new(sort_strings)
-        self._sort_dropdown.add_css_class("filter-dropdown")
-        self._sort_dropdown.connect("notify::selected", self._on_sort_changed)
-        filter_bar.append(self._sort_dropdown)
-
-        # Filetype chips
-        filter_bar.append(Gtk.Separator.new(Gtk.Orientation.VERTICAL))
-        type_label = Gtk.Label(label="Tipo:")
-        type_label.add_css_class("dim-label")
-        filter_bar.append(type_label)
-
-        self._filetype_video = Gtk.ToggleButton.new_with_label("Video")
-        self._filetype_video.set_active(True)
-        self._filetype_video.add_css_class("filter-chip")
-        self._filetype_video.connect("toggled", self._on_filetype_changed)
-        filter_bar.append(self._filetype_video)
-
-        self._filetype_all = Gtk.ToggleButton.new_with_label("Todos")
-        self._filetype_all.add_css_class("filter-chip")
-        self._filetype_all.connect("toggled", self._on_filetype_changed)
-        filter_bar.append(self._filetype_all)
-
-        content.append(filter_bar)
-
-        # Tags FlowBox
+        # Tags FlowBox (compacta, una sola linea con wrap)
         self._tags_flow = Gtk.FlowBox()
-        self._tags_flow.set_max_children_per_line(20)
-        self._tags_flow.set_margin_start(12)
-        self._tags_flow.set_margin_end(12)
+        self._tags_flow.set_max_children_per_line(30)
+        self._tags_flow.set_margin_start(8)
+        self._tags_flow.set_margin_end(8)
+        self._tags_flow.set_margin_top(4)
         self._tags_flow.set_selection_mode(Gtk.SelectionMode.NONE)
+        self._tags_flow.add_css_class("tags-flow")
         content.append(self._tags_flow)
 
         # GridView con cards
@@ -1527,9 +1480,9 @@ class WorkshopBrowser(Adw.Dialog):
         self._stack = Gtk.Stack()
         self._stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
 
-        # Loading
         self._loading_box = Gtk.Box(
-            orientation=Gtk.Orientation.VERTICAL, spacing=12, valign=Gtk.Align.CENTER
+            orientation=Gtk.Orientation.VERTICAL, spacing=12,
+            valign=Gtk.Align.CENTER
         )
         spinner = Gtk.Spinner()
         spinner.set_size_request(48, 48)
@@ -1538,12 +1491,11 @@ class WorkshopBrowser(Adw.Dialog):
         self._loading_box.append(Gtk.Label(label="Cargando Workshop..."))
         self._stack.add_named(self._loading_box, "loading")
 
-        # Grid
         self._stack.add_named(grid_scroll, "grid")
 
-        # Empty
         empty_box = Gtk.Box(
-            orientation=Gtk.Orientation.VERTICAL, spacing=8, valign=Gtk.Align.CENTER
+            orientation=Gtk.Orientation.VERTICAL, spacing=8,
+            valign=Gtk.Align.CENTER
         )
         empty_icon = Gtk.Image.new_from_icon_name("edit-find-symbolic")
         empty_icon.set_pixel_size(64)
@@ -1555,9 +1507,9 @@ class WorkshopBrowser(Adw.Dialog):
         )
         self._stack.add_named(empty_box, "empty")
 
-        # Error
         error_box = Gtk.Box(
-            orientation=Gtk.Orientation.VERTICAL, spacing=8, valign=Gtk.Align.CENTER
+            orientation=Gtk.Orientation.VERTICAL, spacing=8,
+            valign=Gtk.Align.CENTER
         )
         error_icon = Gtk.Image.new_from_icon_name("dialog-error-symbolic")
         error_icon.set_pixel_size(64)
@@ -1572,7 +1524,7 @@ class WorkshopBrowser(Adw.Dialog):
         # Pagination bar
         page_bar = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
-            halign=Gtk.Align.CENTER, margin_top=6, margin_bottom=6
+            halign=Gtk.Align.CENTER, margin_top=4, margin_bottom=6
         )
 
         self._prev_btn = Gtk.Button.new_from_icon_name("go-previous-symbolic")
@@ -1592,9 +1544,8 @@ class WorkshopBrowser(Adw.Dialog):
         content.append(page_bar)
 
         toolbar.set_content(content)
-        self.set_child(toolbar)
+        self.set_content(toolbar)
 
-        # Actualizar estado del boton de login
         self._update_login_button()
 
     # ── Eventos de UI ───────────────────────────────────────────────────
@@ -1610,7 +1561,7 @@ class WorkshopBrowser(Adw.Dialog):
         self._cursor = "*"
         self._load_content()
         self._search_timer = 0
-        return False  # no repetir
+        return False
 
     def _on_sort_changed(self, dropdown, _pspec):
         idx = dropdown.get_selected()
@@ -1620,17 +1571,12 @@ class WorkshopBrowser(Adw.Dialog):
             self._cursor = "*"
             self._load_content()
 
-    def _on_filetype_changed(self, btn: Gtk.ToggleButton):
-        if not btn.get_active():
-            return
-        # Desactivar el otro
-        if btn == self._filetype_video:
-            self._filetype_all.set_active(False)
-        else:
-            self._filetype_video.set_active(False)
-        self._current_page = 1
-        self._cursor = "*"
-        self._load_content()
+    def _on_age_changed(self, dropdown, _pspec):
+        idx = dropdown.get_selected()
+        if 0 <= idx < len(self.AGE_OPTIONS):
+            self._age_filter = self.AGE_OPTIONS[idx][1]
+            # Re-filtrar sin re-consultar la API
+            GLib.idle_add(self._apply_age_filter)
 
     def _on_tag_clicked(self, btn: Gtk.ToggleButton, tag: str):
         if btn.get_active():
@@ -1658,6 +1604,29 @@ class WorkshopBrowser(Adw.Dialog):
             return
         self._toggle_subscribe(item)
 
+    # ── Age filter client-side ──────────────────────────────────────────
+
+    def _apply_age_filter(self):
+        """Re-filtra _raw_items segun _age_filter y actualiza el store."""
+        filtered = self._filter_by_age(self._raw_items)
+        if not filtered:
+            self._stack.set_visible_child_name("empty")
+            return
+        n = self._store.get_n_items()
+        cards = [WorkshopCard(item, "") for item in filtered]
+        self._store.splice(0, n, cards)
+        self._stack.set_visible_child_name("grid")
+        threading.Thread(target=self._download_previews, daemon=True).start()
+
+    def _filter_by_age(self, items: list[WA.WorkshopItem]) -> list[WA.WorkshopItem]:
+        if self._age_filter == "all":
+            return items
+        elif self._age_filter == "sfw":
+            return [i for i in items if not i.is_mature]
+        elif self._age_filter == "mature":
+            return [i for i in items if i.is_mature]
+        return items
+
     # ── Carga de contenido ──────────────────────────────────────────────
 
     def _load_content(self):
@@ -1669,7 +1638,7 @@ class WorkshopBrowser(Adw.Dialog):
         self._next_btn.set_sensitive(False)
 
         try:
-            filetype = WA.FILE_TYPE_ALL if self._filetype_all.get_active() else WA.FILE_TYPE_VIDEO
+            filetype = WA.FILE_TYPE_ALL
             tags = self._tags if self._tags else None
 
             if self._current_query.strip():
@@ -1695,38 +1664,36 @@ class WorkshopBrowser(Adw.Dialog):
         self._cursor = result.next_cursor
         self._total_pages = result.pages
 
-        # Marcar items ya suscritos
+        # Marcar items ya suscritos + guardar raw
         local_ids = self._get_subscribed_ids()
         for item in result.items:
             if item.publishedfileid in local_ids:
                 item.is_subscribed = True
+        self._raw_items = result.items
 
         GLib.idle_add(self._display_results, result)
 
     def _display_results(self, result: WA.SearchResult):
-        # Guardar los WorkshopItems para que _download_previews los acceda
         self._current_items = result.items
 
+        # Aplicar filtro de edad
+        filtered = self._filter_by_age(result.items)
+
         n = self._store.get_n_items()
-        cards = [
-            WorkshopCard(item, "")  # preview_path vacio, se llena en background
-            for item in result.items
-        ]
+        cards = [WorkshopCard(item, "") for item in filtered]
         self._store.splice(0, n, cards)
 
         # Descargar previews en background
-        threading.Thread(
-            target=self._download_previews, daemon=True
-        ).start()
+        threading.Thread(target=self._download_previews, daemon=True).start()
 
-        # Actualizar paginacion
+        # Paginacion
         self._page_label.set_label(
             f"Pagina {result.page} de {result.pages}"
         )
         self._prev_btn.set_sensitive(result.page > 1)
         self._next_btn.set_sensitive(result.page < result.pages)
 
-        if len(result.items) == 0:
+        if len(filtered) == 0:
             self._stack.set_visible_child_name("empty")
         else:
             self._stack.set_visible_child_name("grid")
@@ -1742,7 +1709,9 @@ class WorkshopBrowser(Adw.Dialog):
             except Exception:
                 continue
             if local_path:
-                GLib.idle_add(lambda idx=i, p=local_path: self._update_card_preview(idx, p))
+                GLib.idle_add(
+                    lambda idx=i, p=local_path: self._update_card_preview(idx, p)
+                )
 
     def _update_card_preview(self, idx: int, path: str):
         """Notifica al GridView que el preview del item cambio."""
@@ -1752,9 +1721,6 @@ class WorkshopBrowser(Adw.Dialog):
         if card is None or card.preview_path == path:
             return
         card.preview_path = path
-        # remove + insert es la UNICA forma de forzar re-bind en GTK4.
-        # splice/items_changed con mismo objeto = no-op (compara punteros).
-        # El GridView necesita que GtkListItem.item pase a NULL y vuelva.
         self._store.remove(idx)
         self._store.insert(idx, card)
 
@@ -1765,7 +1731,6 @@ class WorkshopBrowser(Adw.Dialog):
         self._next_btn.set_sensitive(False)
 
     def _get_subscribed_ids(self) -> set[str]:
-        """Obtiene los IDs de wallpapers locales ya descargados."""
         try:
             wallpapers = H.get_all_wallpapers()
             return {w.workshop_id for w in wallpapers if w.workshop_id}
@@ -1776,7 +1741,6 @@ class WorkshopBrowser(Adw.Dialog):
 
     def _toggle_subscribe(self, card):
         if not WA.has_session():
-            # Pedir login primero
             dialog = SteamLoginDialog(
                 on_success=lambda: self._do_subscribe(card)
             )
@@ -1799,7 +1763,6 @@ class WorkshopBrowser(Adw.Dialog):
             if success:
                 card.is_subscribed = True
                 card.notify("is_subscribed")
-                # Tambien intentar unsubscribe local si existe
                 try:
                     H.try_unsubscribe(publishedfileid)
                 except Exception:
@@ -1819,7 +1782,6 @@ class WorkshopBrowser(Adw.Dialog):
 
     def _populate_tags(self, tags: list[str]):
         self._tags_flow.remove_all()
-
         for tag in tags:
             btn = Gtk.ToggleButton.new_with_label(tag)
             btn.add_css_class("pill")
@@ -1854,7 +1816,7 @@ class WorkshopBrowser(Adw.Dialog):
         box.append(picture)
 
         title = Gtk.Label()
-        title.set_ellipsize(3)  # END
+        title.set_ellipsize(3)
         title.set_max_width_chars(22)
         title.set_halign(Gtk.Align.START)
         title.add_css_class("card-label")
