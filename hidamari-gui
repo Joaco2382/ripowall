@@ -1401,34 +1401,15 @@ class WorkshopBrowser(Adw.Window):
     def _build_ui(self):
         toolbar = Adw.ToolbarView()
 
-        # ── HeaderBar con filtros integrados ──────────────────────────
+        # ── HeaderBar ──────────────────────────────────────────────────
         header = Adw.HeaderBar()
         header.set_show_title(False)
 
-        # Search entry
         self._search_entry = Gtk.SearchEntry()
         self._search_entry.set_placeholder_text("Buscar wallpapers...")
-        self._search_entry.set_width_chars(28)
+        self._search_entry.set_width_chars(24)
         self._search_entry.connect("search-changed", self._on_search_changed)
         header.set_title_widget(self._search_entry)
-
-        # Age rating dropdown
-        age_strings = Gtk.StringList()
-        for label, _key in self.AGE_OPTIONS:
-            age_strings.append(label)
-        self._age_dropdown = Gtk.DropDown.new(age_strings)
-        self._age_dropdown.set_tooltip_text("Filtrar por clasificacion de edad")
-        self._age_dropdown.connect("notify::selected", self._on_age_changed)
-        header.pack_end(self._age_dropdown)
-
-        # Sort dropdown
-        sort_strings = Gtk.StringList()
-        for label, _key in self.SORT_OPTIONS:
-            sort_strings.append(label)
-        self._sort_dropdown = Gtk.DropDown.new(sort_strings)
-        self._sort_dropdown.set_tooltip_text("Ordenar resultados")
-        self._sort_dropdown.connect("notify::selected", self._on_sort_changed)
-        header.pack_end(self._sort_dropdown)
 
         # Login Steam
         self._login_btn = Gtk.Button.new_with_label("Login")
@@ -1436,7 +1417,6 @@ class WorkshopBrowser(Adw.Window):
         self._login_btn.connect("clicked", self._on_login_clicked)
         header.pack_end(self._login_btn)
 
-        # Abrir en navegador externo
         ext_btn = Gtk.Button.new_from_icon_name("web-browser-symbolic")
         ext_btn.set_tooltip_text("Abrir en navegador externo")
         ext_btn.connect("clicked", lambda b: subprocess.run(
@@ -1445,20 +1425,99 @@ class WorkshopBrowser(Adw.Window):
 
         toolbar.add_top_bar(header)
 
-        # ── Contenido ─────────────────────────────────────────────────
+        # ── Sidebar + Grid ─────────────────────────────────────────────
+        hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+
+        # Sidebar
+        sidebar = self._build_sidebar()
+        hbox.append(sidebar)
+
+        # Separator
+        sep = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
+        hbox.append(sep)
+
+        # Grid area
+        grid_area = self._build_grid_area()
+        grid_area.set_hexpand(True)
+        hbox.append(grid_area)
+
+        toolbar.set_content(hbox)
+        self.set_content(toolbar)
+
+        self._update_login_button()
+
+    def _build_sidebar(self) -> Gtk.Box:
+        """Sidebar izquierda: filtros colapsables."""
+        sidebar = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=4,
+            width_request=190
+        )
+        sidebar.set_margin_start(8)
+        sidebar.set_margin_end(8)
+        sidebar.set_margin_top(8)
+
+        # Ordenar
+        sort_label = Gtk.Label(label="Ordenar", xalign=0)
+        sort_label.add_css_class("sidebar-heading")
+        sort_label.set_margin_top(4)
+        sidebar.append(sort_label)
+
+        sort_strings = Gtk.StringList()
+        for label, _key in self.SORT_OPTIONS:
+            sort_strings.append(label)
+        self._sort_dropdown = Gtk.DropDown.new(sort_strings)
+        self._sort_dropdown.set_tooltip_text("Ordenar resultados")
+        self._sort_dropdown.connect("notify::selected", self._on_sort_changed)
+        sidebar.append(self._sort_dropdown)
+
+        # Edad
+        age_label = Gtk.Label(label="Clasificacion", xalign=0)
+        age_label.add_css_class("sidebar-heading")
+        age_label.set_margin_top(12)
+        sidebar.append(age_label)
+
+        age_strings = Gtk.StringList()
+        for label, _key in self.AGE_OPTIONS:
+            age_strings.append(label)
+        self._age_dropdown = Gtk.DropDown.new(age_strings)
+        self._age_dropdown.set_tooltip_text("Filtrar por clasificacion de edad")
+        self._age_dropdown.connect("notify::selected", self._on_age_changed)
+        sidebar.append(self._age_dropdown)
+
+        # Tags (multi-select)
+        tags_label = Gtk.Label(label="Tags (multi-select)", xalign=0)
+        tags_label.add_css_class("sidebar-heading")
+        tags_label.set_margin_top(12)
+        sidebar.append(tags_label)
+
+        tags_scroll = Gtk.ScrolledWindow()
+        tags_scroll.set_vexpand(True)
+        tags_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        tags_scroll.set_min_content_height(200)
+
+        self._tags_flow = Gtk.FlowBox()
+        self._tags_flow.set_max_children_per_line(2)
+        self._tags_flow.set_selection_mode(Gtk.SelectionMode.NONE)
+        self._tags_flow.set_row_spacing(2)
+        self._tags_flow.set_column_spacing(2)
+        tags_scroll.set_child(self._tags_flow)
+        sidebar.append(tags_scroll)
+
+        # Boton Aplicar filtros
+        apply_btn = Gtk.Button.new_with_label("Aplicar filtros")
+        apply_btn.set_tooltip_text("Recargar con los tags seleccionados")
+        apply_btn.add_css_class("suggested-action")
+        apply_btn.set_margin_top(8)
+        apply_btn.connect("clicked", self._on_apply_filters)
+        sidebar.append(apply_btn)
+
+        return sidebar
+
+    def _build_grid_area(self) -> Gtk.Box:
+        """Area derecha: GridView + paginacion + estados."""
         content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
 
-        # Tags FlowBox (compacta, una sola linea con wrap)
-        self._tags_flow = Gtk.FlowBox()
-        self._tags_flow.set_max_children_per_line(30)
-        self._tags_flow.set_margin_start(8)
-        self._tags_flow.set_margin_end(8)
-        self._tags_flow.set_margin_top(4)
-        self._tags_flow.set_selection_mode(Gtk.SelectionMode.NONE)
-        self._tags_flow.add_css_class("tags-flow")
-        content.append(self._tags_flow)
-
-        # GridView con cards
+        # GridView con cards mas chicas (160x130 para mas densidad)
         factory = Gtk.SignalListItemFactory()
         factory.connect("setup", self._on_card_setup)
         factory.connect("bind", self._on_card_bind)
@@ -1470,19 +1529,20 @@ class WorkshopBrowser(Adw.Window):
         self._grid = Gtk.GridView.new(self._selection, factory)
         self._grid.set_single_click_activate(True)
         self._grid.connect("activate", self._on_card_activate)
+        self._grid.set_max_columns(0)  # auto
 
         grid_scroll = Gtk.ScrolledWindow()
         grid_scroll.set_vexpand(True)
         grid_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         grid_scroll.set_child(self._grid)
 
-        # Stack: loading / grid / empty / error
+        # Stack
         self._stack = Gtk.Stack()
         self._stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
 
         self._loading_box = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL, spacing=12,
-            valign=Gtk.Align.CENTER
+            valign=Gtk.Align.CENTER, halign=Gtk.Align.CENTER
         )
         spinner = Gtk.Spinner()
         spinner.set_size_request(48, 48)
@@ -1495,7 +1555,7 @@ class WorkshopBrowser(Adw.Window):
 
         empty_box = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL, spacing=8,
-            valign=Gtk.Align.CENTER
+            valign=Gtk.Align.CENTER, halign=Gtk.Align.CENTER
         )
         empty_icon = Gtk.Image.new_from_icon_name("edit-find-symbolic")
         empty_icon.set_pixel_size(64)
@@ -1503,13 +1563,13 @@ class WorkshopBrowser(Adw.Window):
         empty_box.append(empty_icon)
         empty_box.append(Gtk.Label(label="Sin resultados"))
         empty_box.append(
-            Gtk.Label(label="Proba con otros terminos de busqueda o filtros")
+            Gtk.Label(label="Proba con otros terminos o filtros")
         )
         self._stack.add_named(empty_box, "empty")
 
         error_box = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL, spacing=8,
-            valign=Gtk.Align.CENTER
+            valign=Gtk.Align.CENTER, halign=Gtk.Align.CENTER
         )
         error_icon = Gtk.Image.new_from_icon_name("dialog-error-symbolic")
         error_icon.set_pixel_size(64)
@@ -1521,32 +1581,24 @@ class WorkshopBrowser(Adw.Window):
 
         content.append(self._stack)
 
-        # Pagination bar
+        # Pagination
         page_bar = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
             halign=Gtk.Align.CENTER, margin_top=4, margin_bottom=6
         )
-
         self._prev_btn = Gtk.Button.new_from_icon_name("go-previous-symbolic")
         self._prev_btn.set_sensitive(False)
         self._prev_btn.connect("clicked", lambda b: self._go_page(-1))
-
         self._page_label = Gtk.Label(label="Pagina 1 de 1")
-
         self._next_btn = Gtk.Button.new_from_icon_name("go-next-symbolic")
         self._next_btn.set_sensitive(False)
         self._next_btn.connect("clicked", lambda b: self._go_page(1))
-
         page_bar.append(self._prev_btn)
         page_bar.append(self._page_label)
         page_bar.append(self._next_btn)
-
         content.append(page_bar)
 
-        toolbar.set_content(content)
-        self.set_content(toolbar)
-
-        self._update_login_button()
+        return content
 
     # ── Eventos de UI ───────────────────────────────────────────────────
 
@@ -1579,10 +1631,15 @@ class WorkshopBrowser(Adw.Window):
             GLib.idle_add(self._apply_age_filter)
 
     def _on_tag_clicked(self, btn: Gtk.ToggleButton, tag: str):
+        """Acumula tags sin recargar. El usuario debe hacer clic en 'Aplicar'."""
         if btn.get_active():
-            self._tags.append(tag)
+            if tag not in self._tags:
+                self._tags.append(tag)
         else:
             self._tags = [t for t in self._tags if t != tag]
+
+    def _on_apply_filters(self, btn: Gtk.Button):
+        """Aplica todos los filtros acumulados y recarga."""
         self._current_page = 1
         self._cursor = "*"
         self._load_content()
@@ -1811,13 +1868,13 @@ class WorkshopBrowser(Adw.Window):
 
         picture = Gtk.Picture()
         picture.set_content_fit(Gtk.ContentFit.COVER)
-        picture.set_size_request(200, 160)
+        picture.set_size_request(160, 130)
         picture.add_css_class("card-picture")
         box.append(picture)
 
         title = Gtk.Label()
         title.set_ellipsize(3)
-        title.set_max_width_chars(22)
+        title.set_max_width_chars(18)
         title.set_halign(Gtk.Align.START)
         title.add_css_class("card-label")
         box.append(title)
