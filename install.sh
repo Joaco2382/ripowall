@@ -16,7 +16,7 @@ ICONS_DIR="${HOME}/.local/share/icons"
 SYSTEMD_USER="${HOME}/.config/systemd/user"
 CONFIG_DIR="${HOME}/.config/hidamari"
 
-RIPOWALL_VERSION="3.1.0"
+RIPOWALL_VERSION="3.2.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo -e "${CYAN}${BOLD}═══ RipoWall v${RIPOWALL_VERSION} — Instalador ═══${RESET}"
@@ -125,7 +125,7 @@ install_ripowall() {
     mkdir -p "$BIN_DIR" "$APPS_DIR" "$CONFIG_DIR" "$SYSTEMD_USER"
 
     # Scripts
-    for f in hidamari_core.py hidamari-daemon hidamari-gui wallpaper_engine_launcher.py; do
+    for f in hidamari_core.py hidamari-daemon hidamari-gui wallpaper_engine_launcher.py workshop_api.py; do
         if [ -f "${SCRIPT_DIR}/${f}" ]; then
             cp "${SCRIPT_DIR}/${f}" "$BIN_DIR/"
             chmod +x "$BIN_DIR/$f"

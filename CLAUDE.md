@@ -1,23 +1,25 @@
 # CLAUDE.md — RipoWall
 
-Proyecto RipoWall v3.1: launcher de Wallpaper Engine para Linux + GUI nativa GTK4 de gestion de wallpapers animados.
+Proyecto RipoWall v3.2: launcher de Wallpaper Engine para Linux + GUI nativa GTK4 de gestion de wallpapers animados con Workshop nativo integrado.
 
 ## Stack
 
 - **Lenguaje:** Python 3.11+
 - **GUI:** GTK4 + libadwaita (sin Glade/XML, todo programatico)
-- **WebView:** WebKitGTK 6.0 (`webkitgtk-6.0`) para WorkshopBrowser integrado
+- **WebView:** WebKitGTK 6.0 (`webkitgtk-6.0`) SOLO para SteamLoginDialog (login inicial)
+- **Steam API:** `workshop_api.py` → Steam Web API (IPublishedFileService + ISteamRemoteStorage)
 - **DBus:** pydbus + gdbus para Mutter DisplayConfig y Hidamari
 - **Systemd:** servicios user para daemon y rotacion
 - **Proton:** CachyOS SLR (o cualquier Proton compatible)
 
-## Arquitectura v3.1
+## Arquitectura v3.2
 
 ```
+workshop_api.py                ← Steam Web API client: busqueda, detalles, subscribe/unsubscribe
 wallpaper_engine_launcher.py  ← Lanza WE via Steam/Proton (portable, auto-detecta todo)
 hidamari_core.py              ← Modulo compartido: catalogo, monitores, DBus, config, WE API
 hidamari-daemon               ← Servicio systemd: rotacion cada 10 min, hotplug, Workshop watcher
-hidamari-gui                  ← App GTK4 + Adwaita: galeria GridView, sidebar monitores, busqueda, WorkshopBrowser WebView
+hidamari-gui                  ← App GTK4 + Adwaita: galeria GridView, sidebar monitores, busqueda, WorkshopBrowser NATIVO
 ```
 
 ### Componentes de la GUI (hidamari-gui)
@@ -26,17 +28,28 @@ hidamari-gui                  ← App GTK4 + Adwaita: galeria GridView, sidebar 
 |----------------|-----------|
 | `RipoWallApp` | Punto de entrada, Gtk.Application |
 | `RipoWallWindow` | Ventana principal: sidebar, galeria, barra de herramientas |
-| `WorkshopBrowser(Adw.Dialog)` | WebView nativo del Steam Workshop (busca y subscribe sin Proton) |
+| `WorkshopCard(GObject)` | Item del Workshop para GridView (publishedfileid, title, preview_path, stats, is_subscribed) |
+| `WorkshopBrowser(Adw.Dialog)` | UI 100% GTK4 nativa: SearchBar, filtros, tags FlowBox, GridView, paginacion |
+| `SteamLoginDialog(Adw.Dialog)` | WebView MINIMO solo para login de Steam (extrae cookie y cierra) |
 | `MonitorRow` | Sidebar: icono y nombre del monitor, asignacion actual |
 
-### Flujo de suscripcion WorkshopBrowser
+### Flujo del Workshop Nativo
 
 ```
-WorkshopBrowser (WebKit 6.0) → steamcommunity.com/app/431960/workshop/
+WorkshopBrowser (UI GTK4 nativa)
         │
-        ├─ Usuario navega, busca, filtra
-        ├─ Click en Subscribe → POST a API web de Steam Community
+        ├─ SearchBar → workshop_api.search_workshop()
+        ├─ SortDropdown → query_type (trending/popular/recent)
+        ├─ TagChips → requiredtags
+        ├─ GridView → WorkshopCard con thumbnails descargados via CDN
+        ├─ Subscribe btn → workshop_api.subscribe(id) con cookie de sesion
         │
+        ▼
+Steam Web API (IPublishedFileService/QueryFiles/v1/)
+        │  requiere API key en ~/.config/ripowall/steam_api_key
+        ▼
+Steam Community (sharedfiles/subscribe/)
+        │  requiere cookie de sesion → SteamLoginDialog (WebView minimo)
         ▼
 Steam cliente detecta suscripcion → descarga MP4
         │
@@ -64,17 +77,24 @@ Steam Workshop (WebView o app WE) → MP4 en workshop/content/431960/
                             RipoWall GUI ← DBus → asigna/quita/controla
 ```
 
-## WorkshopBrowser — Detalles tecnicos
+## WorkshopBrowser — Detalles tecnicos (v3.2)
 
-- **WebView:** `WebKit.WebView()` nativo con GTK4, embebido en `Adw.Dialog`
-- **URL:** `https://steamcommunity.com/app/431960/workshop/`
-- **User-Agent:** Safari 17.0 en Linux x86_64 (evita bloqueos de navegador)
-- **Seguridad:** Sin acceso al portapapeles (`javascript_can_access_clipboard = False`), developer extras deshabilitados
-- **URI interception:** `decide-policy` captura `steam://` URIs → `xdg-open`
-- **Cookies:** Persisten en el data storage de WebKit (sesion de Steam se mantiene)
-- **Progress bar:** `Gtk.ProgressBar` sincronizada con `estimated-load-progress`
-- **Fallback:** Boton en headerbar para abrir en navegador externo (`xdg-open`)
-- **Ventaja clave:** Cero dependencia de Proton/Wine/CEF para buscar y suscribirse a wallpapers
+- **UI:** 100% GTK4 nativa: `Gtk.SearchEntry`, `Gtk.DropDown` (sort), `Gtk.FlowBox` (tags), `Gtk.GridView` (wallpapers)
+- **API:** `workshop_api.py` consume Steam Web API (`IPublishedFileService/QueryFiles/v1/`, `ISteamRemoteStorage/GetPublishedFileDetails/v1/`)
+- **API Key:** `~/.config/ripowall/steam_api_key` (gratis en https://steamcommunity.com/dev/apikey)
+- **Previews:** Descargados del CDN de Steam via `workshop_api.download_preview()`, cache en `~/.cache/ripowall/workshop/`
+- **Subscribe:** `POST` a `steamcommunity.com/sharedfiles/subscribe/` con cookie de sesion
+- **Login:** `SteamLoginDialog` — WebView MINIMO solo para login de Steam, extrae cookie via `CookieManager.get_cookies()`, se cierra automaticamente
+- **Paginacion:** Cursor-based (Steam API) + indicadores `[Prev] Pagina X de Y [Next]`
+- **Threading:** API calls en `threading.Thread`, UI updates via `GLib.idle_add`
+
+## SteamLoginDialog — Solo para extraer cookie de sesion
+
+- **WebView:** `WebKit.WebView()` minimo, carga `steamcommunity.com/login/home/`
+- **Cookie extraction:** `webview.get_network_session().get_cookie_manager().get_cookies()` async
+- **Deteccion de login:** `load-changed == FINISHED` + URL sin "login" → extrae cookies
+- **Seguridad:** Sin acceso al portapapeles, developer extras deshabilitados
+- **Almacenamiento:** Cookie guardada en `~/.config/ripowall/steam_session` (0600)
 
 ## WebKitGTK 6.0 — Paquetes por distro
 
@@ -85,7 +105,7 @@ Steam Workshop (WebView o app WE) → MP4 en workshop/content/431960/
 | Fedora | `webkitgtk6.0-devel` |
 | openSUSE | `webkitgtk6.0-devel` |
 
-> La GUI requiere WebKitGTK 6.0 para el WorkshopBrowser. Si no esta disponible, la app funciona igual pero sin el navegador integrado (el boton del Workshop abrira el launcher de Proton como fallback).
+> La GUI requiere WebKitGTK 6.0 SOLO para el SteamLoginDialog (login inicial). Si no esta disponible, la app funciona igual pero sin posibilidad de suscribirse a wallpapers (solo busqueda y navegacion).
 
 ## Paths clave (TODO portable, no hardcodeados)
 
@@ -152,4 +172,4 @@ python3 ripowall_diagnostics.py
 
 ## Version
 
-**v3.1.0** — Julio 2026
+**v3.2.0** — Julio 2026

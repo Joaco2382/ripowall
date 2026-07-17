@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
+from typing import Callable
 
 sys.path.insert(0, os.path.join(os.path.expanduser("~"), ".local", "bin"))
 
@@ -24,6 +25,11 @@ gi.require_version("WebKit", "6.0")
 from gi.repository import Gtk, Adw, GLib, Gdk, Gio, GObject, WebKit
 
 import hidamari_core as H
+
+try:
+    import workshop_api as WA
+except ImportError:
+    WA = None  # type: ignore[assignment]
 
 try:
     from ripowall_diagnostics import auto_diagnose_and_save
@@ -1053,30 +1059,56 @@ class RipoWallWindow(Adw.ApplicationWindow):
     # =========================================================================
 
     def _refresh_we_status(self):
-        """Actualiza el icono del Workshop: gris/rojo si Steam no corre."""
+        """Actualiza el icono del Workshop segun estado de Steam, API y sesion."""
         try:
             steam_ok = subprocess.run(
                 ["pgrep", "-x", "steam"], capture_output=True, timeout=3
             ).returncode == 0
-            if steam_ok:
-                self.we_btn.remove_css_class("destructive-action")
-                self.we_btn.set_tooltip_text("Steam Workshop — Buscar wallpapers")
-            else:
+            has_api = WA and WA.has_api_key()
+            has_sess = WA and WA.has_session()
+
+            self.we_btn.remove_css_class("destructive-action")
+            self.we_btn.remove_css_class("suggested-action")
+
+            if not steam_ok:
                 self.we_btn.add_css_class("destructive-action")
-                self.we_btn.remove_css_class("suggested-action")
-                self.we_btn.set_tooltip_text("Steam no esta corriendo. Inicia Steam para descargar wallpapers.")
+                self.we_btn.set_tooltip_text(
+                    "Steam no esta corriendo. Inicia Steam para descargar wallpapers."
+                )
+            elif not has_api:
+                self.we_btn.add_css_class("destructive-action")
+                self.we_btn.set_tooltip_text(
+                    "Falta API Key de Steam. Configurala en ~/.config/ripowall/steam_api_key"
+                )
+            elif has_sess:
+                self.we_btn.add_css_class("suggested-action")
+                self.we_btn.set_tooltip_text(
+                    "Steam Workshop — Buscar y suscribirse a wallpapers"
+                )
+            else:
+                self.we_btn.set_tooltip_text(
+                    "Steam Workshop — Buscar wallpapers (requiere login para suscribirse)"
+                )
         except Exception:
             pass
         return True
 
     def _on_we_launch(self, btn: Gtk.Button):
-        """Abre el navegador del Steam Workshop en un WebView nativo."""
+        """Abre el navegador nativo del Steam Workshop."""
+        if WA is None:
+            self._show_error(
+                "Modulo workshop_api no encontrado. Reinstala RipoWall."
+            )
+            return
+
         try:
             steam_ok = subprocess.run(
                 ["pgrep", "-x", "steam"], capture_output=True, timeout=3
             ).returncode == 0
             if not steam_ok:
-                self._show_error("Steam no esta corriendo. Inicia Steam para descargar wallpapers.")
+                self._show_error(
+                    "Steam no esta corriendo. Inicia Steam para descargar wallpapers."
+                )
                 return
 
             dialog = WorkshopBrowser(self)
@@ -1152,46 +1184,56 @@ class RipoWallWindow(Adw.ApplicationWindow):
 
 
 # ---------------------------------------------------------------------------
-# WorkshopBrowser — WebView nativo del Steam Workshop
+# WorkshopCard — GObject para cada wallpaper en el GridView del Workshop
 # ---------------------------------------------------------------------------
 
 WORKSHOP_URL = "https://steamcommunity.com/app/431960/workshop/"
 
 
-class WorkshopBrowser(Adw.Dialog):
-    """Dialogo con WebView del Steam Workshop para buscar wallpapers.
+class WorkshopCard(GObject.GObject):
+    """Item del Workshop para Gio.ListStore + GridView."""
 
-    Flujo:
-    1. Abre steamcommunity.com/app/431960/workshop/ en WebKit nativo
-    2. Si no hay sesion, Steam pide login (usuario se loguea una vez)
-    3. Cookies persisten en WebKit, sesion se mantiene
-    4. Usuario navega, busca, filtra y hace clic en Subscribe
-    5. El Subscribe es un POST a la API web de Steam Community
-    6. Steam cliente detecta la suscripcion y descarga los archivos
-    7. Daemon de RipoWall detecta los nuevos MP4 y aparecen en la galeria
+    publishedfileid = GObject.Property(type=str, default="")
+    title = GObject.Property(type=str, default="")
+    preview_path = GObject.Property(type=str, default="")
+    subscriptions = GObject.Property(type=int, default=0)
+    favorited = GObject.Property(type=int, default=0)
+    is_subscribed = GObject.Property(type=bool, default=False)
 
-    steam:// URIs se interceptan y redirigen a xdg-open.
-    Cero dependencia de Proton/Wine/CEF.
+    def __init__(self, item: WA.WorkshopItem, preview_path: str = ""):
+        super().__init__()
+        self.publishedfileid = item.publishedfileid
+        self.title = item.title
+        self.preview_path = preview_path
+        self.subscriptions = item.subscriptions
+        self.favorited = item.favorited
+        self.is_subscribed = item.is_subscribed
+
+
+# ---------------------------------------------------------------------------
+# SteamLoginDialog — WebView minimo para login de Steam
+# ---------------------------------------------------------------------------
+
+class SteamLoginDialog(Adw.Dialog):
+    """Dialogo con WebView SOLO para que el usuario se loguee en Steam.
+
+    Extrae la cookie de sesion y la guarda para usar en subscribe/unsubscribe.
     """
 
-    def __init__(self, parent: RipoWallWindow):
+    LOGIN_URL = "https://steamcommunity.com/login/home/"
+
+    def __init__(self, on_success: Callable[[], None] | None = None):
         super().__init__()
-        self.set_title("Steam Workshop — Wallpaper Engine")
-        self.set_content_width(1100)
-        self.set_content_height(750)
+        self.set_title("Iniciar sesion en Steam")
+        self.set_content_width(500)
+        self.set_content_height(600)
+        self._on_success = on_success
 
         toolbar = Adw.ToolbarView()
 
         header = Adw.HeaderBar()
         header.set_show_title(True)
-        header.set_title_widget(Gtk.Label(label="Steam Workshop"))
-
-        # Botón: abrir en navegador externo (fallback)
-        ext_btn = Gtk.Button.new_from_icon_name("web-browser-symbolic")
-        ext_btn.set_tooltip_text("Abrir en navegador externo")
-        ext_btn.connect("clicked", lambda b: subprocess.run(
-            ["xdg-open", WORKSHOP_URL], start_new_session=True))
-        header.pack_end(ext_btn)
+        header.set_title_widget(Gtk.Label(label="Steam Login"))
 
         close_btn = Gtk.Button.new_with_label("Cerrar")
         close_btn.connect("clicked", lambda b: self.close())
@@ -1199,7 +1241,6 @@ class WorkshopBrowser(Adw.Dialog):
 
         toolbar.add_top_bar(header)
 
-        # ── WebView + Config ──────────────────────────────────────────
         self._webview = WebKit.WebView()
         self._webview.set_vexpand(True)
 
@@ -1211,23 +1252,18 @@ class WorkshopBrowser(Adw.Dialog):
         settings.set_enable_developer_extras(False)
         settings.set_javascript_can_access_clipboard(False)
 
-        # Interceptar steam:// URIs → xdg-open
-        self._webview.connect("decide-policy", self._on_decide_policy)
+        self._webview.connect("load-changed", self._on_load_changed)
+        self._webview.load_uri(self.LOGIN_URL)
 
-        # Cargar Workshop
-        self._webview.load_uri(WORKSHOP_URL)
-
-        # ── Progress bar ──────────────────────────────────────────────
         self._progress = Gtk.ProgressBar()
         self._progress.set_show_text(False)
         self._progress.set_margin_start(6)
         self._progress.set_margin_end(6)
         self._progress.set_margin_bottom(6)
-        self._webview.connect("notify::estimated-load-progress",
-                              self._on_progress)
-        self._webview.connect("load-changed", self._on_load_changed)
+        self._webview.connect(
+            "notify::estimated-load-progress", self._on_progress
+        )
 
-        # ── Layout ────────────────────────────────────────────────────
         scroll = Gtk.ScrolledWindow()
         scroll.set_child(self._webview)
 
@@ -1239,26 +1275,554 @@ class WorkshopBrowser(Adw.Dialog):
         toolbar.set_content(box)
         self.set_child(toolbar)
 
-    def _on_decide_policy(self, webview, decision, decision_type):
-        """Intercepta steam:// URIs y las pasa a xdg-open."""
-        if decision_type != WebKit.PolicyDecisionType.NAVIGATION_ACTION:
-            return False
-        nav = decision.get_navigation_action()
-        uri = nav.get_request().get_uri()
-        if uri.startswith("steam://"):
-            decision.ignore()
-            subprocess.run(["xdg-open", uri], start_new_session=True)
-            return True
-        return False
-
     def _on_progress(self, webview, _pspec):
         self._progress.set_fraction(webview.get_estimated_load_progress())
 
     def _on_load_changed(self, webview, load_event, _data=None):
         if load_event == WebKit.LoadEvent.FINISHED:
             self._progress.set_visible(False)
+            uri = webview.get_uri() or ""
+            # Si ya no estamos en login, el usuario se logueo
+            if uri.startswith("https://steamcommunity.com/") and "login" not in uri:
+                self._extract_and_save_cookie(webview)
         elif load_event == WebKit.LoadEvent.STARTED:
             self._progress.set_visible(True)
+
+    def _extract_and_save_cookie(self, webview):
+        """Extrae la cookie de sesion via CookieManager y la guarda."""
+        try:
+            session = webview.get_network_session()
+            manager = session.get_cookie_manager()
+            manager.get_cookies(None, self._on_cookies_fetched, None)
+        except Exception as e:
+            GLib.idle_add(self._on_login_failed, str(e))
+
+    def _on_cookies_fetched(self, manager, result, *args):
+        try:
+            cookies = manager.get_cookies_finish(result)
+        except Exception as e:
+            GLib.idle_add(self._on_login_failed, str(e))
+            return
+
+        cookie_parts = []
+        for c in cookies:
+            domain = c.get_domain() or ""
+            # Recoger todas las cookies de Steam
+            if "steam" in domain.lower():
+                cookie_parts.append(f"{c.get_name()}={c.get_value()}")
+
+        if cookie_parts:
+            try:
+                WA.save_session_cookie("; ".join(cookie_parts))
+                GLib.idle_add(self._on_login_success)
+            except Exception as e:
+                GLib.idle_add(self._on_login_failed, str(e))
+        else:
+            GLib.idle_add(self._on_login_failed, "No se encontraron cookies de Steam")
+
+    def _on_login_success(self):
+        self.close()
+        if self._on_success:
+            self._on_success()
+
+    def _on_login_failed(self, error: str):
+        print(f"[ripowall] Error extrayendo cookie: {error}", flush=True)
+        self.close()
+
+
+# ---------------------------------------------------------------------------
+# WorkshopBrowser — UI nativa GTK4 del Steam Workshop
+# ---------------------------------------------------------------------------
+
+class WorkshopBrowser(Adw.Dialog):
+    """Navegador nativo del Steam Workshop usando la Steam Web API.
+
+    UI 100% GTK4 + Adwaita. Usa workshop_api para buscar,
+    filtrar y suscribirse. Solo requiere WebView para el login inicial.
+    """
+
+    SORT_OPTIONS = [
+        ("Tendencia", "trending"),
+        ("Populares", "popular"),
+        ("Recientes", "recent"),
+        ("Actualizados", "updated"),
+    ]
+
+    def __init__(self, parent: RipoWallWindow):
+        super().__init__()
+        self._parent = parent
+
+        self.set_title("Steam Workshop — Wallpaper Engine")
+        self.set_content_width(1100)
+        self.set_content_height(750)
+
+        # Estado interno
+        self._store = Gio.ListStore.new(WorkshopCard.__gtype__)
+        self._current_page = 1
+        self._total_pages = 1
+        self._current_sort = "trending"
+        self._current_query = ""
+        self._cursor = "*"
+        self._search_timer: int = 0
+        self._tags: list[str] = []
+
+        self._build_ui()
+        self._load_trending_tags()
+        self._load_content()
+
+    def _build_ui(self):
+        toolbar = Adw.ToolbarView()
+
+        # ── Header ────────────────────────────────────────────────────
+        header = Adw.HeaderBar()
+        header.set_show_title(False)
+
+        # Search entry en el header
+        self._search_entry = Gtk.SearchEntry()
+        self._search_entry.set_placeholder_text("Buscar wallpapers...")
+        self._search_entry.set_width_chars(30)
+        self._search_entry.connect("search-changed", self._on_search_changed)
+        header.set_title_widget(self._search_entry)
+
+        # Boton: abrir en navegador externo (fallback)
+        ext_btn = Gtk.Button.new_from_icon_name("web-browser-symbolic")
+        ext_btn.set_tooltip_text("Abrir en navegador externo")
+        ext_btn.connect("clicked", lambda b: subprocess.run(
+            ["xdg-open", WORKSHOP_URL], start_new_session=True))
+        header.pack_end(ext_btn)
+
+        # Boton: login Steam
+        self._login_btn = Gtk.Button.new_with_label("Login")
+        self._login_btn.set_tooltip_text("Iniciar sesion en Steam para suscribirse")
+        self._login_btn.connect("clicked", self._on_login_clicked)
+        header.pack_end(self._login_btn)
+
+        close_btn = Gtk.Button.new_with_label("Cerrar")
+        close_btn.connect("clicked", lambda b: self.close())
+        header.pack_end(close_btn)
+
+        toolbar.add_top_bar(header)
+
+        # ── Contenido ─────────────────────────────────────────────────
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+
+        # Filtros: sort dropdown
+        filter_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        filter_bar.set_margin_start(12)
+        filter_bar.set_margin_end(12)
+        filter_bar.set_margin_top(6)
+
+        sort_label = Gtk.Label(label="Ordenar:")
+        sort_label.add_css_class("dim-label")
+        filter_bar.append(sort_label)
+
+        sort_strings = Gtk.StringList()
+        for label, _key in self.SORT_OPTIONS:
+            sort_strings.append(label)
+        self._sort_dropdown = Gtk.DropDown.new(sort_strings)
+        self._sort_dropdown.connect("notify::selected", self._on_sort_changed)
+        filter_bar.append(self._sort_dropdown)
+
+        # Filetype chips
+        filter_bar.append(Gtk.Separator.new(Gtk.Orientation.VERTICAL))
+        type_label = Gtk.Label(label="Tipo:")
+        type_label.add_css_class("dim-label")
+        filter_bar.append(type_label)
+
+        self._filetype_video = Gtk.ToggleButton.new_with_label("Video")
+        self._filetype_video.set_active(True)
+        self._filetype_video.connect("toggled", self._on_filetype_changed)
+        filter_bar.append(self._filetype_video)
+
+        self._filetype_all = Gtk.ToggleButton.new_with_label("Todos")
+        self._filetype_all.connect("toggled", self._on_filetype_changed)
+        filter_bar.append(self._filetype_all)
+
+        content.append(filter_bar)
+
+        # Tags FlowBox
+        self._tags_flow = Gtk.FlowBox()
+        self._tags_flow.set_max_children_per_line(20)
+        self._tags_flow.set_margin_start(12)
+        self._tags_flow.set_margin_end(12)
+        self._tags_flow.set_selection_mode(Gtk.SelectionMode.NONE)
+        content.append(self._tags_flow)
+
+        # GridView con cards
+        factory = Gtk.SignalListItemFactory()
+        factory.connect("setup", self._on_card_setup)
+        factory.connect("bind", self._on_card_bind)
+
+        self._selection = Gtk.SingleSelection.new(self._store)
+        self._selection.set_autoselect(False)
+        self._selection.set_can_unselect(True)
+
+        self._grid = Gtk.GridView.new(self._selection, factory)
+        self._grid.set_single_click_activate(True)
+        self._grid.connect("activate", self._on_card_activate)
+
+        grid_scroll = Gtk.ScrolledWindow()
+        grid_scroll.set_vexpand(True)
+        grid_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        grid_scroll.set_child(self._grid)
+
+        # Stack: loading / grid / empty / error
+        self._stack = Gtk.Stack()
+        self._stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+
+        # Loading
+        self._loading_box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=12, valign=Gtk.Align.CENTER
+        )
+        spinner = Gtk.Spinner()
+        spinner.set_size_request(48, 48)
+        spinner.start()
+        self._loading_box.append(spinner)
+        self._loading_box.append(Gtk.Label(label="Cargando Workshop..."))
+        self._stack.add_named(self._loading_box, "loading")
+
+        # Grid
+        self._stack.add_named(grid_scroll, "grid")
+
+        # Empty
+        empty_box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=8, valign=Gtk.Align.CENTER
+        )
+        empty_icon = Gtk.Image.new_from_icon_name("edit-find-symbolic")
+        empty_icon.set_pixel_size(64)
+        empty_icon.set_opacity(0.4)
+        empty_box.append(empty_icon)
+        empty_box.append(Gtk.Label(label="Sin resultados"))
+        empty_box.append(
+            Gtk.Label(label="Proba con otros terminos de busqueda o filtros")
+        )
+        self._stack.add_named(empty_box, "empty")
+
+        # Error
+        error_box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=8, valign=Gtk.Align.CENTER
+        )
+        error_icon = Gtk.Image.new_from_icon_name("dialog-error-symbolic")
+        error_icon.set_pixel_size(64)
+        error_icon.set_opacity(0.4)
+        error_box.append(error_icon)
+        self._error_label = Gtk.Label(label="Error de conexion")
+        error_box.append(self._error_label)
+        self._stack.add_named(error_box, "error")
+
+        content.append(self._stack)
+
+        # Pagination bar
+        page_bar = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+            halign=Gtk.Align.CENTER, margin_top=6, margin_bottom=6
+        )
+
+        self._prev_btn = Gtk.Button.new_from_icon_name("go-previous-symbolic")
+        self._prev_btn.set_sensitive(False)
+        self._prev_btn.connect("clicked", lambda b: self._go_page(-1))
+
+        self._page_label = Gtk.Label(label="Pagina 1 de 1")
+
+        self._next_btn = Gtk.Button.new_from_icon_name("go-next-symbolic")
+        self._next_btn.set_sensitive(False)
+        self._next_btn.connect("clicked", lambda b: self._go_page(1))
+
+        page_bar.append(self._prev_btn)
+        page_bar.append(self._page_label)
+        page_bar.append(self._next_btn)
+
+        content.append(page_bar)
+
+        toolbar.set_content(content)
+        self.set_child(toolbar)
+
+        # Actualizar estado del boton de login
+        self._update_login_button()
+
+    # ── Eventos de UI ───────────────────────────────────────────────────
+
+    def _on_search_changed(self, entry: Gtk.SearchEntry):
+        if self._search_timer:
+            GLib.source_remove(self._search_timer)
+        self._search_timer = GLib.timeout_add(400, self._do_search, entry.get_text())
+
+    def _do_search(self, query: str):
+        self._current_query = query
+        self._current_page = 1
+        self._cursor = "*"
+        self._load_content()
+        self._search_timer = 0
+        return False  # no repetir
+
+    def _on_sort_changed(self, dropdown, _pspec):
+        idx = dropdown.get_selected()
+        if 0 <= idx < len(self.SORT_OPTIONS):
+            self._current_sort = self.SORT_OPTIONS[idx][1]
+            self._current_page = 1
+            self._cursor = "*"
+            self._load_content()
+
+    def _on_filetype_changed(self, btn: Gtk.ToggleButton):
+        if not btn.get_active():
+            return
+        # Desactivar el otro
+        if btn == self._filetype_video:
+            self._filetype_all.set_active(False)
+        else:
+            self._filetype_video.set_active(False)
+        self._current_page = 1
+        self._cursor = "*"
+        self._load_content()
+
+    def _on_tag_clicked(self, btn: Gtk.ToggleButton, tag: str):
+        if btn.get_active():
+            self._tags.append(tag)
+        else:
+            self._tags = [t for t in self._tags if t != tag]
+        self._current_page = 1
+        self._cursor = "*"
+        self._load_content()
+
+    def _go_page(self, delta: int):
+        new_page = self._current_page + delta
+        if new_page < 1 or new_page > self._total_pages:
+            return
+        self._current_page = new_page
+        self._load_content()
+
+    def _on_login_clicked(self, btn: Gtk.Button):
+        dialog = SteamLoginDialog(on_success=self._update_login_button)
+        dialog.present(self)
+
+    def _on_card_activate(self, grid_view: Gtk.GridView, position: int):
+        item = self._store.get_item(position)
+        if item is None:
+            return
+        self._toggle_subscribe(item)
+
+    # ── Carga de contenido ──────────────────────────────────────────────
+
+    def _load_content(self):
+        self._stack.set_visible_child_name("loading")
+        threading.Thread(target=self._load_content_worker, daemon=True).start()
+
+    def _load_content_worker(self):
+        self._prev_btn.set_sensitive(False)
+        self._next_btn.set_sensitive(False)
+
+        try:
+            filetype = WA.FILE_TYPE_ALL if self._filetype_all.get_active() else WA.FILE_TYPE_VIDEO
+            tags = self._tags if self._tags else None
+
+            if self._current_query.strip():
+                result = WA.search_by_text(
+                    self._current_query, page=self._current_page
+                )
+            else:
+                result = WA.search_workshop(
+                    sort=self._current_sort,
+                    page=self._current_page,
+                    filetype=filetype,
+                    tags=tags,
+                    cursor=self._cursor,
+                )
+        except Exception as e:
+            GLib.idle_add(self._show_error, f"Error de red: {e}")
+            return
+
+        if result is None:
+            GLib.idle_add(self._show_error, "No se pudo conectar a la API de Steam")
+            return
+
+        self._cursor = result.next_cursor
+        self._total_pages = result.pages
+
+        # Marcar items ya suscritos
+        local_ids = self._get_subscribed_ids()
+        for item in result.items:
+            if item.publishedfileid in local_ids:
+                item.is_subscribed = True
+
+        GLib.idle_add(self._display_results, result)
+
+    def _display_results(self, result: WA.SearchResult):
+        # Descargar previews en background
+        threading.Thread(
+            target=self._download_previews, args=(result.items,), daemon=True
+        ).start()
+
+        n = self._store.get_n_items()
+        cards = [
+            WorkshopCard(item, item.preview_url)
+            for item in result.items
+        ]
+        self._store.splice(0, n, cards)
+
+        # Actualizar paginacion
+        self._page_label.set_label(
+            f"Pagina {result.page} de {result.pages}"
+        )
+        self._prev_btn.set_sensitive(result.page > 1)
+        self._next_btn.set_sensitive(result.page < result.pages)
+
+        if len(result.items) == 0:
+            self._stack.set_visible_child_name("empty")
+        else:
+            self._stack.set_visible_child_name("grid")
+
+    def _download_previews(self, items: list[WA.WorkshopItem]):
+        """Descarga previews en background y actualiza el store via idle_add."""
+        for i, item in enumerate(items):
+            if not item.preview_url:
+                continue
+            local_path = WA.download_preview(item.preview_url, item.publishedfileid)
+            if local_path:
+                GLib.idle_add(self._update_card_preview, i, local_path)
+
+    def _update_card_preview(self, idx: int, path: str):
+        if idx < self._store.get_n_items():
+            card = self._store.get_item(idx)
+            if card and card.preview_path != path:
+                card.preview_path = path
+                # splice fuerza re-bind del GridView
+                self._store.splice(idx, 1, [card])
+
+    def _show_error(self, msg: str):
+        self._error_label.set_label(msg)
+        self._stack.set_visible_child_name("error")
+        self._prev_btn.set_sensitive(False)
+        self._next_btn.set_sensitive(False)
+
+    def _get_subscribed_ids(self) -> set[str]:
+        """Obtiene los IDs de wallpapers locales ya descargados."""
+        try:
+            wallpapers = H.get_all_wallpapers()
+            return {w.workshop_id for w in wallpapers if w.workshop_id}
+        except Exception:
+            return set()
+
+    # ── Subscribe / Unsubscribe ─────────────────────────────────────────
+
+    def _toggle_subscribe(self, card):
+        if not WA.has_session():
+            # Pedir login primero
+            dialog = SteamLoginDialog(
+                on_success=lambda: self._do_subscribe(card)
+            )
+            dialog.present(self)
+            return
+        self._do_subscribe(card)
+
+    def _do_subscribe(self, card):
+        if card is None:
+            return
+
+        publishedfileid = card.publishedfileid
+        if card.is_subscribed:
+            success = WA.unsubscribe(publishedfileid)
+            if success:
+                card.is_subscribed = False
+                card.notify("is_subscribed")
+        else:
+            success = WA.subscribe(publishedfileid)
+            if success:
+                card.is_subscribed = True
+                card.notify("is_subscribed")
+                # Tambien intentar unsubscribe local si existe
+                try:
+                    H.try_unsubscribe(publishedfileid)
+                except Exception:
+                    pass
+
+    # ── Tags ────────────────────────────────────────────────────────────
+
+    def _load_trending_tags(self):
+        threading.Thread(target=self._load_tags_worker, daemon=True).start()
+
+    def _load_tags_worker(self):
+        try:
+            tags = WA.fetch_trending_tags(limit=20)
+            GLib.idle_add(self._populate_tags, tags)
+        except Exception:
+            GLib.idle_add(self._populate_tags, WA._default_tags())
+
+    def _populate_tags(self, tags: list[str]):
+        self._tags_flow.remove_all()
+
+        for tag in tags:
+            btn = Gtk.ToggleButton.new_with_label(tag)
+            btn.add_css_class("pill")
+            btn.add_css_class("caption")
+            btn.connect("clicked", self._on_tag_clicked, tag)
+            self._tags_flow.append(btn)
+
+    def _update_login_button(self):
+        if WA and WA.has_session():
+            self._login_btn.set_label("✓ Login")
+            self._login_btn.set_tooltip_text("Sesion de Steam activa")
+            self._login_btn.set_sensitive(False)
+        else:
+            self._login_btn.set_label("Login Steam")
+            self._login_btn.set_tooltip_text("Inicia sesion para suscribirte a wallpapers")
+            self._login_btn.set_sensitive(True)
+
+    # ── GridView factory ────────────────────────────────────────────────
+
+    def _on_card_setup(self, factory, list_item):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box.set_margin_start(4)
+        box.set_margin_end(4)
+        box.set_margin_top(4)
+        box.set_margin_bottom(4)
+        box.add_css_class("card")
+
+        picture = Gtk.Picture()
+        picture.set_content_fit(Gtk.ContentFit.COVER)
+        picture.set_size_request(200, 160)
+        picture.add_css_class("card-picture")
+        box.append(picture)
+
+        title = Gtk.Label()
+        title.set_ellipsize(3)  # END
+        title.set_max_width_chars(22)
+        title.set_halign(Gtk.Align.START)
+        title.add_css_class("card-label")
+        box.append(title)
+
+        stats = Gtk.Label()
+        stats.set_ellipsize(3)
+        stats.set_halign(Gtk.Align.START)
+        stats.add_css_class("card-label")
+        stats.add_css_class("dim-label")
+        stats.set_margin_top(0)
+        box.append(stats)
+
+        list_item.set_child(box)
+
+    def _on_card_bind(self, factory, list_item):
+        box = list_item.get_child()
+        picture = box.get_first_child()
+        title_label = picture.get_next_sibling()
+        stats_label = title_label.get_next_sibling()
+
+        item = list_item.get_item()
+        if item is None:
+            return
+
+        title_label.set_label(item.title)
+
+        stats = f"⭐ {item.subscriptions:,}  ❤ {item.favorited:,}"
+        if item.is_subscribed:
+            stats += "  [✓ Suscrito]"
+        stats_label.set_label(stats)
+
+        if item.preview_path and os.path.isfile(item.preview_path):
+            picture.set_filename(item.preview_path)
+        else:
+            picture.set_filename(None)
+
+        box._workshop_item = item
 
 
 # ---------------------------------------------------------------------------

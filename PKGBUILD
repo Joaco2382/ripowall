@@ -2,7 +2,7 @@
 # Contributor: RipoTech <hola@ripotech.cl>
 
 pkgname=ripowall
-pkgver=3.1.0
+pkgver=3.2.0
 pkgrel=1
 pkgdesc="Gestiona wallpapers animados en Linux integrando Wallpaper Engine (Steam/Proton) con Hidamari"
 arch=('any')
@@ -39,6 +39,7 @@ package() {
     install -Dm755 hidamari-daemon          "${pkgdir}/usr/bin/hidamari-daemon"
     install -Dm755 hidamari-gui             "${pkgdir}/usr/bin/hidamari-gui"
     install -Dm755 wallpaper_engine_launcher.py "${pkgdir}/usr/bin/wallpaper_engine_launcher.py"
+    install -Dm755 workshop_api.py           "${pkgdir}/usr/bin/workshop_api.py"
     install -Dm755 ripowall_diagnostics.py  "${pkgdir}/usr/bin/ripowall_diagnostics.py"
 
     # Symlink ripowall-we
