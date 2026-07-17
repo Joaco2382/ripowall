@@ -30,13 +30,12 @@ STEAM_COMMUNITY = "https://steamcommunity.com"
 WORKSHOP_APPID = 431960  # Wallpaper Engine
 
 # EPublishedFileInfoMatchingFileType (valores oficiales de steam-rs)
-FILE_TYPE_ALL = 0          # Items
-FILE_TYPE_COLLECTIONS = 1  # Collections
-FILE_TYPE_ART = 2          # Art
-FILE_TYPE_VIDEO = 3        # Videos
-FILE_TYPE_SCREENSHOTS = 4  # Screenshots
-FILE_TYPE_SCENE = 2        # Scenes = Art type (aprox)
-FILE_TYPE_WEB = 0          # Web/app se filtra via otros medios
+# NOTA: Todos los wallpapers de WE son file_type=0 (Items), no 3 (Videos).
+# El filetype 3 retorna 0 resultados para appid 431960.
+FILE_TYPE_ALL = -1         # No filtrar (no pasa el parametro)
+FILE_TYPE_VIDEO = 0        # Items — todos los wallpapers de WE
+FILE_TYPE_SCENE = 0        # Scene = también Items
+FILE_TYPE_WEB = 0          # Web = también Items
 
 # EPublishedFileQueryType
 QUERY_RANKED_BY_VOTE = 0
@@ -258,22 +257,25 @@ def _parse_workshop_item(raw: dict) -> WorkshopItem:
     tags = []
     for t in raw.get("tags", []):
         if isinstance(t, dict):
-            tags.append(t.get("tag", ""))
+            # display_name es más legible que tag (ej: "2560 x 1440" vs "2560x1440")
+            tag_name = t.get("display_name", "") or t.get("tag", "")
+            if tag_name:
+                tags.append(tag_name)
         elif isinstance(t, str):
             tags.append(t)
 
     return WorkshopItem(
         publishedfileid=str(raw.get("publishedfileid", "")),
         title=raw.get("title", ""),
-        description=raw.get("description", ""),
+        description=raw.get("short_description", ""),
         preview_url=raw.get("preview_url", ""),
-        file_url=raw.get("file_url", ""),
+        file_url=raw.get("url", ""),
         file_size=int(raw.get("file_size", 0)),
         file_type=int(raw.get("file_type", 0)),
         subscriptions=int(raw.get("subscriptions", 0)),
         favorited=int(raw.get("favorited", 0)),
         lifetime_subscriptions=int(raw.get("lifetime_subscriptions", 0)),
-        creator_name=raw.get("creator_name", ""),
+        creator_name="",
         creator_id=str(raw.get("creator", "")),
         tags=tags,
         time_created=int(raw.get("time_created", 0)),
@@ -325,7 +327,8 @@ def search_workshop(
     if query.strip():
         query_type = QUERY_RANKED_BY_TEXT_SEARCH
 
-    params = {
+    # Solo incluir parámetros con valor (evitar strings vacíos que la API rechaza)
+    params: dict[str, str | int] = {
         "key": api_key,
         "query_type": query_type,
         "page": page,
@@ -333,27 +336,21 @@ def search_workshop(
         "numperpage": min(per_page, 100),
         "creator_appid": WORKSHOP_APPID,
         "appid": WORKSHOP_APPID,
-        "requiredtags": ",".join(tags) if tags else "",
-        "match_all_tags": "true" if tags else "false",
-        "required_flags": "",
-        "omitted_flags": "",
-        "search_text": query.strip(),
-        "filetype": filetype,
-        "child_publishedfileid": "0",
-        "days": "7",
-        "include_recent_votes_only": "true",
-        "required_kv_tags": "{}",
         "return_vote_data": "true",
         "return_tags": "true",
-        "return_kv_tags": "false",
         "return_previews": "true",
-        "return_children": "false",
         "return_short_description": "true",
-        "return_for_sale_data": "false",
-        "return_metadata": "false",
-        "return_playtime_stats": "0",
-        "language": "0",  # all languages
     }
+
+    if filetype != FILE_TYPE_ALL:
+        params["filetype"] = filetype
+
+    if tags:
+        params["requiredtags"] = ",".join(tags)
+        params["match_all_tags"] = "true"
+
+    if query.strip():
+        params["search_text"] = query.strip()
 
     cache_k = _cache_key("search", **{k: str(v) for k, v in params.items()})
     cached = _cache_get(cache_k)
