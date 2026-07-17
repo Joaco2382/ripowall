@@ -248,6 +248,9 @@ class RipoWallWindow(Adw.ApplicationWindow):
         self.set_default_size(960, 680)
         self.set_size_request(640, 400)
 
+        # Icono a nivel ventana (X11 + compositores sin herencia de app)
+        self.set_icon_name("ripowall")
+
         # Estado mutable
         self._all_wallpapers: list[H.Wallpaper] = []
         self._monitor_rows: dict[str, MonitorRow] = {}
@@ -1734,7 +1737,10 @@ class WorkshopBrowser(Adw.Dialog):
         for i, item in enumerate(items):
             if not item.preview_url:
                 continue
-            local_path = WA.download_preview(item.preview_url, item.publishedfileid)
+            try:
+                local_path = WA.download_preview(item.preview_url, item.publishedfileid)
+            except Exception:
+                continue
             if local_path:
                 GLib.idle_add(lambda idx=i, p=local_path: self._update_card_preview(idx, p))
 
