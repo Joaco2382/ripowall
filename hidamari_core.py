@@ -217,6 +217,34 @@ def get_connected_monitors() -> list[MonitorInfo]:
         return []
 
 
+def get_display_layout() -> tuple:
+    """Firma del layout actual: (conector, x, y, escala) por monitor lógico + modos activos.
+
+    Cambia cuando se modifica la escala o la resolución aunque los conectores
+    sigan siendo los mismos. Hidamari no redimensiona su ventana en ese caso
+    (bug en base_player._on_size_changed), así que hay que recargar el player.
+    """
+    try:
+        r = subprocess.run(
+            ["gdbus", "call", "--session", "--dest", "org.gnome.Mutter.DisplayConfig",
+             "--object-path", "/org/gnome/Mutter/DisplayConfig",
+             "--method", "org.gnome.Mutter.DisplayConfig.GetCurrentState"],
+            capture_output=True, text=True, timeout=5, check=True
+        )
+        logical = re.findall(
+            r"\((-?\d+), (-?\d+), ([\d.]+), (?:uint32 )?\d+, (?:true|false), \[\('([^']+)'",
+            r.stdout
+        )
+        modes = re.findall(
+            r"\('(\d+x\d+@[\d.]+)', \d+, \d+, [\d.]+, [\d.]+, \[[^\]]*\], \{[^}]*'is-current': <true>",
+            r.stdout
+        )
+        return (tuple(sorted(logical, key=lambda l: l[3])), tuple(sorted(modes)))
+    except Exception as e:
+        print(f"[core] Error leyendo layout de pantallas: {e}", flush=True)
+        return ()
+
+
 # ── Config ──────────────────────────────────────────────────────────────────
 
 def load_config() -> dict:

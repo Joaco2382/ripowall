@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.expanduser("~/.local/bin"))
 from hidamari_core import (
     get_all_wallpapers,
     get_connected_monitors,
+    get_display_layout,
     load_config,
     save_config,
     reload_config,
@@ -197,6 +198,7 @@ def main():
         )
     except Exception:
         log("No se pudo iniciar el watcher de hotplug")
+    known_layout = get_display_layout()
 
     while running:
         try:
@@ -227,8 +229,16 @@ def main():
                                 config = load_config()
                                 config = assign_wallpapers_to_config(config, wallpapers)
                                 reload_config()
-                except Exception:
-                    pass
+                            else:
+                                layout = get_display_layout()
+                                if layout and layout != known_layout:
+                                    # Escala o resolución cambió: el player queda con la
+                                    # ventana del tamaño viejo, hay que recrearlo.
+                                    log("Cambio de escala/resolución — recargando player")
+                                    reload_config()
+                            known_layout = get_display_layout() or known_layout
+                except Exception as e:
+                    log(f"Error en watcher de monitores: {e}")
 
             # 3. Rotación
             if do_rotate and time.time() - last_rotate > rotate_minutes * 60:
