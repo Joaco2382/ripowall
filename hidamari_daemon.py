@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 
-# Asegurar que ~/.local/bin está en el path
+# hidamari_core.py se importa desde la carpeta real del script (repo, ~/.local/bin o /usr/bin)
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))  # hidamari_core.py va junto al script
 
 from hidamari_core import (
@@ -24,6 +24,8 @@ from hidamari_core import (
     get_display_layout,
     get_rotate_minutes,
     load_config,
+    load_settings,
+    save_settings,
     save_config,
     sanitize_hidamari_config,
     reload_config,
@@ -50,43 +52,71 @@ def shutdown(sig, frame):
 
 def clean_monitors(config):
     """Elimina del data_source los monitores que ya no están conectados.
-    Siempre mantiene 'Default'."""
+    Siempre mantiene 'Default'. Recuerda el wallpaper de cada uno para devolvérselo
+    si se vuelve a conectar (ajustes de RipoWall: monitores_recordados)."""
     monitors = get_connected_monitors()
     active_conns = {m.connector for m in monitors}
     active_conns.add("Default")
 
     ds = config.get("data_source", {})
-    removed = []
+    removed = {}
     for key in list(ds.keys()):
         if key not in active_conns:
-            removed.append(key)
-            del ds[key]
+            removed[key] = ds.pop(key)
 
     if removed:
-        log(f"Monitores huérfanos eliminados: {removed}")
+        log(f"Monitores huérfanos eliminados: {list(removed)}")
+        settings = load_settings()
+        settings.setdefault("monitores_recordados", {}).update(removed)
+        if not save_settings(settings):
+            log("No se pudo recordar el wallpaper de los monitores desconectados")
 
 
-def assign_wallpapers_to_config(config, wallpapers):
-    """Asigna wallpaper distinto a cada monitor conectado y guarda config."""
+def missing_monitors(config, wallpapers):
+    """Monitores conectados que no tienen un wallpaper valido asignado."""
+    ds = config.get("data_source", {})
+    valid_paths = {w.path for w in wallpapers}
+    return [m.connector for m in get_connected_monitors() if ds.get(m.connector) not in valid_paths]
+
+
+def assign_wallpapers_to_config(config, wallpapers, only=None):
+    """Asigna un wallpaper distinto a los monitores conectados y guarda config.
+
+    only: conectores a los que asignar. None = todos (rotacion). Al conectar un
+    monitor o arrancar sin rotacion se pasan solo los que no tienen wallpaper,
+    para no pisar lo que el usuario eligio en los demas.
+    """
     monitors = get_connected_monitors()
     clean_monitors(config)
 
-    ds = config.get("data_source", {})
+    ds = config.setdefault("data_source", {})
     current_paths = set(ds.values())
 
     conns = [m.connector for m in monitors]
+    targets = conns if only is None else [c for c in conns if c in only]
 
-    assignment = pick_random_wallpapers(conns, wallpapers, current_paths)
-    if not assignment and wallpapers:
-        assignment = pick_random_wallpapers(conns, wallpapers)  # sin avoid
+    assignment = {}
+    if only is not None:
+        # Un monitor que vuelve a conectarse recupera el wallpaper que tenia
+        valid_paths = {w.path for w in wallpapers}
+        remembered = load_settings().get("monitores_recordados", {})
+        for conn in list(targets):
+            if remembered.get(conn) in valid_paths:
+                assignment[conn] = remembered[conn]
+                targets.remove(conn)
+    if targets:
+        picked = pick_random_wallpapers(targets, wallpapers, current_paths)
+        if not picked and wallpapers:
+            picked = pick_random_wallpapers(targets, wallpapers)  # sin avoid
+        assignment.update(picked)
 
     for conn, path in assignment.items():
         ds[conn] = path
 
-    # Default = primer monitor o aleatorio
-    if conns:
+    # Default = el del primer monitor (o uno al azar si no hay monitores ni Default)
+    if conns and ds.get(conns[0]):
         ds["Default"] = ds[conns[0]]
-    elif wallpapers:
+    elif wallpapers and not ds.get("Default"):
         ds["Default"] = random.choice(wallpapers).path
 
     config["mode"] = "MODE_VIDEO"
@@ -182,12 +212,14 @@ def main():
         log("config.json de Hidamari reparada (fade_interval/audio_volume)")
         save_config(config)
 
-    ds = config.get("data_source", {})
-    valid_paths = {w.path for w in wallpapers}
-    missing = [m.connector for m in get_connected_monitors() if ds.get(m.connector) not in valid_paths]
-    if (do_rotate and rotate_minutes() > 0) or missing or once:
+    missing = missing_monitors(config, wallpapers)
+    if (do_rotate and rotate_minutes() > 0) or once:
         log("Asignando wallpapers...")
         config = assign_wallpapers_to_config(config, wallpapers)
+    elif missing:
+        # Sin rotacion: solo los monitores sin wallpaper; el resto conserva el elegido
+        log(f"Asignando wallpaper a monitores sin uno: {', '.join(missing)}")
+        config = assign_wallpapers_to_config(config, wallpapers, only=missing)
     else:
         log("Rotación desactivada: se mantiene el wallpaper elegido")
     reload_config()
@@ -247,7 +279,10 @@ def main():
                             if current_conns != known_conns:
                                 log(f"Cambio de monitores: {len(current)} activos")
                                 config = load_config()
-                                config = assign_wallpapers_to_config(config, wallpapers)
+                                # Solo los recien conectados reciben wallpaper nuevo; los
+                                # desconectados los quita clean_monitors. Los demas no cambian.
+                                config = assign_wallpapers_to_config(
+                                    config, wallpapers, only=missing_monitors(config, wallpapers))
                                 reload_config()
                             else:
                                 layout = get_display_layout()
