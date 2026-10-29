@@ -484,6 +484,19 @@ def set_volume(vol: int) -> bool:
         return False
 
 
+def _parse_gdbus_props(text: str) -> dict:
+    """Parsea la salida de gdbus GetAll: ({'is_mute': <true>, 'volume': <0>, 'mode': <'MODE_VIDEO'>},)"""
+    props = {}
+    for key, val in re.findall(r"'(\w+)':\s*<([^>]*)>", text):
+        if val in ("true", "false"):
+            props[key] = val == "true"
+        elif re.fullmatch(r"(?:int32\s+)?-?\d+", val):
+            props[key] = int(val.split()[-1])
+        else:
+            props[key] = val.strip("'")
+    return props
+
+
 def get_server_properties() -> dict:
     """Obtiene todas las propiedades del servidor Hidamari."""
     try:
@@ -494,17 +507,9 @@ def get_server_properties() -> dict:
              DBUS_SERVER_IFACE],
             capture_output=True, text=True, timeout=3, check=True
         )
-        # Parsear output gdbus: ({'key': <'val'>, ...},)
-        props = {}
-        # Simplificado: parsear pares clave-valor del output
-        for match in re.finditer(r"'(is_[^']+)',\s*<(true|false)>", r.stdout):
-            props[match.group(1)] = match.group(2) == "true"
-        for match in re.finditer(r"'(mode|data_source)',\s*<'([^']*)'>", r.stdout):
-            props[match.group(1)] = match.group(2)
-        for match in re.finditer(r"'(volume)',\s*<int32\s*(\d+)>", r.stdout):
-            props[match.group(1)] = int(match.group(2))
-        return props
-    except Exception:
+        return _parse_gdbus_props(r.stdout)
+    except Exception as e:
+        print(f"[core] Error leyendo propiedades de Hidamari: {e}", flush=True)
         return {}
 
 

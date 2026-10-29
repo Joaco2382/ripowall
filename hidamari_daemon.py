@@ -16,7 +16,7 @@ import sys
 import time
 
 # Asegurar que ~/.local/bin está en el path
-sys.path.insert(0, os.path.expanduser("~/.local/bin"))
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))  # hidamari_core.py va junto al script
 
 from hidamari_core import (
     get_all_wallpapers,
@@ -201,9 +201,9 @@ def main():
     # Para detectar cuando el usuario elige un wallpaper a mano desde la GUI
     last_ds = dict(load_config().get("data_source", {}))
 
+    last_mins = rotate_minutes()
     if do_rotate:
-        mins = rotate_minutes()
-        log(f"Rotación cada {mins} min" if mins else "Rotación desactivada")
+        log(f"Rotación cada {last_mins} min" if last_mins else "Rotación desactivada")
 
     log("Vigilando cambios en Steam Workshop...")
     log("Conectá/desconectá monitores — se detecta solo.")
@@ -268,6 +268,10 @@ def main():
                 last_ds = dict(ds_now)
                 last_rotate = time.time()
             mins = rotate_minutes()
+            if do_rotate and mins != last_mins:
+                # Cambiado desde la GUI (~/.config/ripowall/settings.json)
+                log(f"Rotación cambiada: cada {mins} min" if mins else "Rotación cambiada: desactivada")
+                last_mins = mins
             if do_rotate and mins > 0 and time.time() - last_rotate > mins * 60:
                 log("Rotación...")
                 config = load_config()
