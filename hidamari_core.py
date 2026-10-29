@@ -273,6 +273,68 @@ def save_config(config: dict) -> bool:
         return False
 
 
+def sanitize_hidamari_config(config: dict) -> bool:
+    """Corrige valores de config.json que rompen a Hidamari. Retorna True si cambió algo.
+
+    - fade_interval: segundos entre pasos del fundido de volumen (default 0.1).
+      Versiones viejas de RipoWall guardaban ahí la rotación (600) y pausar
+      tardaba 10 minutos en hacer efecto.
+    - audio_volume: con 0 el fundido nunca termina (paso 0) y pausar no hace nada.
+      El silencio se maneja con is_mute, no con el volumen.
+    - pause_when_maximized: clave equivocada; Hidamari lee is_pause_when_maximized.
+    """
+    changed = False
+    fade = config.get("fade_interval")
+    if not isinstance(fade, (int, float)) or not 0 < fade <= 1:
+        config["fade_interval"] = 0.1
+        changed = True
+    vol = config.get("audio_volume")
+    if not isinstance(vol, (int, float)) or vol <= 0:
+        config["audio_volume"] = 50
+        changed = True
+    if "pause_when_maximized" in config:
+        config.setdefault("is_pause_when_maximized", config["pause_when_maximized"])
+        del config["pause_when_maximized"]
+        changed = True
+    return changed
+
+
+# ── Ajustes propios de RipoWall ─────────────────────────────────────────────
+
+SETTINGS_PATH = os.path.join(Path.home(), ".config/ripowall/settings.json")
+DEFAULT_ROTATE_MINUTES = 10
+
+
+def load_settings() -> dict:
+    """Ajustes de RipoWall (no de Hidamari): rotate_minutes (0 = sin rotación)."""
+    try:
+        with open(SETTINGS_PATH, encoding='utf-8') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"[core] Error leyendo {SETTINGS_PATH}: {e}", flush=True)
+        return {}
+
+
+def save_settings(settings: dict) -> bool:
+    try:
+        os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
+        tmp = SETTINGS_PATH + ".tmp"
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(settings, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, SETTINGS_PATH)
+        return True
+    except OSError as e:
+        print(f"[core] Error guardando ajustes: {e}", flush=True)
+        return False
+
+
+def get_rotate_minutes() -> int:
+    val = load_settings().get("rotate_minutes", DEFAULT_ROTATE_MINUTES)
+    return val if isinstance(val, int) and val >= 0 else DEFAULT_ROTATE_MINUTES
+
+
 def get_current_wallpapers() -> dict[str, str]:
     """Devuelve {monitor: path_video} desde config.json."""
     config = load_config()
@@ -381,20 +443,30 @@ def start_playback() -> bool:
         return False
 
 
-def set_mute(muted: bool) -> bool:
-    """Mutea/desmutea el audio."""
-    val = "<true>" if muted else "<false>"
+def _set_server_bool(prop: str, value: bool) -> bool:
+    val = "<true>" if value else "<false>"
     try:
         subprocess.run(
             ["gdbus", "call", "--session", "--dest", DBUS_SERVER_BUS,
              "--object-path", DBUS_SERVER_PATH,
              "--method", "org.freedesktop.DBus.Properties.Set",
-             DBUS_SERVER_IFACE, "is_mute", val],
+             DBUS_SERVER_IFACE, prop, val],
             capture_output=True, timeout=3, check=True
         )
         return True
-    except Exception:
+    except Exception as e:
+        print(f"[core] Error cambiando {prop}: {e}", flush=True)
         return False
+
+
+def set_mute(muted: bool) -> bool:
+    """Mutea/desmutea el audio."""
+    return _set_server_bool("is_mute", muted)
+
+
+def set_pause_when_maximized(enabled: bool) -> bool:
+    """Pausar el video cuando hay una ventana maximizada o en pantalla completa."""
+    return _set_server_bool("is_pause_when_maximized", enabled)
 
 
 def set_volume(vol: int) -> bool:

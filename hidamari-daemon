@@ -22,12 +22,13 @@ from hidamari_core import (
     get_all_wallpapers,
     get_connected_monitors,
     get_display_layout,
+    get_rotate_minutes,
     load_config,
     save_config,
+    sanitize_hidamari_config,
     reload_config,
     pick_random_wallpapers,
     rebuild_flat_folder,
-    Wallpaper,
 )
 
 # Usar rutas del core (portable, multi-distro)
@@ -89,8 +90,9 @@ def assign_wallpapers_to_config(config, wallpapers):
         ds["Default"] = random.choice(wallpapers).path
 
     config["mode"] = "MODE_VIDEO"
-    config["is_mute"] = True
-    config["audio_volume"] = 0
+    # El silencio lo decide el usuario (is_mute); no forzar volumen 0,
+    # que deja el fundido de Hidamari colgado y pausar no hace nada.
+    sanitize_hidamari_config(config)
     save_config(config)
 
     for mon, path in assignment.items():
@@ -125,7 +127,8 @@ def watch_workshop(config, known_count):
 def main():
     global running
 
-    rotate_minutes = 10
+    # None = leer el intervalo de ~/.config/ripowall/settings.json (lo cambia la GUI)
+    cli_rotate_minutes = None
     do_rotate = True
     once = False
 
@@ -133,7 +136,7 @@ def main():
     i = 0
     while i < len(args):
         if args[i] == "--rotate-min" and i + 1 < len(args):
-            rotate_minutes = int(args[i + 1])
+            cli_rotate_minutes = int(args[i + 1])
             i += 2
         elif args[i] == "--no-rotate":
             do_rotate = False
@@ -170,9 +173,23 @@ def main():
         config = {"data_source": {"Default": wallpapers[0].path}, "mode": "MODE_VIDEO"}
         save_config(config)
 
+    def rotate_minutes():
+        return cli_rotate_minutes if cli_rotate_minutes is not None else get_rotate_minutes()
+
+    rebuild_flat_folder()  # limpia symlinks rotos de wallpapers borrados
     clean_monitors(config)
-    log("Asignando wallpapers...")
-    config = assign_wallpapers_to_config(config, wallpapers)
+    if sanitize_hidamari_config(config):
+        log("config.json de Hidamari reparada (fade_interval/audio_volume)")
+        save_config(config)
+
+    ds = config.get("data_source", {})
+    valid_paths = {w.path for w in wallpapers}
+    missing = [m.connector for m in get_connected_monitors() if ds.get(m.connector) not in valid_paths]
+    if (do_rotate and rotate_minutes() > 0) or missing or once:
+        log("Asignando wallpapers...")
+        config = assign_wallpapers_to_config(config, wallpapers)
+    else:
+        log("Rotación desactivada: se mantiene el wallpaper elegido")
     reload_config()
 
     if once:
@@ -181,9 +198,12 @@ def main():
 
     known_count = len(wallpapers)
     last_rotate = time.time()
+    # Para detectar cuando el usuario elige un wallpaper a mano desde la GUI
+    last_ds = dict(load_config().get("data_source", {}))
 
     if do_rotate:
-        log(f"Rotación cada {rotate_minutes} min")
+        mins = rotate_minutes()
+        log(f"Rotación cada {mins} min" if mins else "Rotación desactivada")
 
     log("Vigilando cambios en Steam Workshop...")
     log("Conectá/desconectá monitores — se detecta solo.")
@@ -241,12 +261,20 @@ def main():
                     log(f"Error en watcher de monitores: {e}")
 
             # 3. Rotación
-            if do_rotate and time.time() - last_rotate > rotate_minutes * 60:
+            ds_now = load_config().get("data_source", {})
+            if ds_now and ds_now != last_ds:
+                # Alguien (la GUI) cambió el wallpaper: el contador parte de cero
+                # para que la rotación no le pise la elección enseguida.
+                last_ds = dict(ds_now)
+                last_rotate = time.time()
+            mins = rotate_minutes()
+            if do_rotate and mins > 0 and time.time() - last_rotate > mins * 60:
                 log("Rotación...")
                 config = load_config()
                 config = assign_wallpapers_to_config(config, wallpapers)
                 reload_config()
                 last_rotate = time.time()
+                last_ds = dict(config.get("data_source", {}))
 
         except Exception as e:
             log(f"Error: {e}")

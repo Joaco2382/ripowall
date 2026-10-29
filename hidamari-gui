@@ -44,6 +44,9 @@ except ImportError:
 GUI_STATE_PATH = os.path.expanduser("~/.config/hidamari/gui-state.json")
 SIDEBAR_WIDTH = 160
 ACCENT = "#00d4ff"
+# Opciones del selector de rotacion (minutos; 0 = sin rotacion)
+ROTATE_OPTIONS_MIN = [0, 5, 10, 30, 60]
+ROTATE_LABELS = ["Off", "5 min", "10 min", "30 min", "1 hora"]
 
 # ---------------------------------------------------------------------------
 # CSS
@@ -317,17 +320,20 @@ class RipoWallWindow(Adw.ApplicationWindow):
 
             self.mute_checkbox.set_active(config.get("is_mute", False))
 
-            interval = config.get("fade_interval", 0)
-            idx_map = {0: 0, 300: 1, 600: 2, 1800: 3, 3600: 4}
+            minutes = H.get_rotate_minutes()
             self._interval_blocked = True
-            self.interval_dropdown.set_selected(idx_map.get(interval, 0))
+            self.interval_dropdown.set_selected(
+                ROTATE_OPTIONS_MIN.index(minutes)
+                if minutes in ROTATE_OPTIONS_MIN else 2
+            )
             self._interval_blocked = False
 
+            # Default de Hidamari: True
             self.pause_max_checkbox.set_active(
-                config.get("pause_when_maximized", False)
+                config.get("is_pause_when_maximized", True)
             )
-        except Exception:
-            pass
+        except Exception as e:
+            self._show_error(f"Error leyendo configuracion: {e}")
 
         self._refresh_monitors()
         return False
@@ -463,9 +469,7 @@ class RipoWallWindow(Adw.ApplicationWindow):
         interval_lbl.set_halign(Gtk.Align.START)
         interval_row.append(interval_lbl)
 
-        strings = Gtk.StringList.new(
-            ["Off", "5 min", "10 min", "30 min", "1 hora"]
-        )
+        strings = Gtk.StringList.new(ROTATE_LABELS)
         self.interval_dropdown = Gtk.DropDown.new(strings)
         self.interval_dropdown.set_tooltip_text(
             "Intervalo de rotacion automatica"
@@ -851,7 +855,7 @@ class RipoWallWindow(Adw.ApplicationWindow):
         try:
             ok = H.assign_video_to_monitor(item.path, connector)
             if ok:
-                name = os.path.basename(item.path)
+                name = item.title
                 self._show_toast(f"Asignado a {connector}")
                 if connector in self._monitor_rows:
                     self._monitor_rows[connector].update_wallpaper(name)
@@ -899,6 +903,13 @@ class RipoWallWindow(Adw.ApplicationWindow):
     # Refresco de monitores (periodico)
     # =========================================================================
 
+    def _wallpaper_title(self, path: str) -> str:
+        """Titulo del Workshop para un path (el nombre del .mp4 suele ser 'outfinal.mp4')."""
+        if not path:
+            return "--"
+        wp = next((w for w in self._all_wallpapers if w.path == path), None)
+        return wp.title if wp else os.path.basename(path)
+
     def _refresh_monitors(self):
         """Reconstruye la lista de monitores en el sidebar."""
         try:
@@ -922,7 +933,7 @@ class RipoWallWindow(Adw.ApplicationWindow):
                 wp_path = current_wps.get(
                     m.connector, m.current_wallpaper or ""
                 )
-                wp_name = os.path.basename(wp_path) if wp_path else "--"
+                wp_name = self._wallpaper_title(wp_path)
 
                 w = MonitorRow(m.connector, wp_name)
                 lr = Gtk.ListBoxRow()
@@ -936,7 +947,7 @@ class RipoWallWindow(Adw.ApplicationWindow):
 
             # Default siempre visible
             def_path = current_wps.get("Default", "")
-            def_name = os.path.basename(def_path) if def_path else "--"
+            def_name = self._wallpaper_title(def_path)
             dw = MonitorRow("Default", def_name, is_default=True)
             dlr = Gtk.ListBoxRow()
             dlr.set_child(dw)
@@ -1036,8 +1047,17 @@ class RipoWallWindow(Adw.ApplicationWindow):
             assigned = H.pick_random_wallpapers(
                 connectors, self._all_wallpapers
             )
-            for conn, path in assigned.items():
-                H.assign_video_to_monitor(path, conn)
+            # Un solo guardado + una recarga (assign_video_to_monitor por
+            # monitor reinicia el player una vez por cada pantalla)
+            config = H.load_config()
+            ds = config.setdefault("data_source", {})
+            ds.update(assigned)
+            if connectors[0] in assigned:
+                ds["Default"] = assigned[connectors[0]]
+            config["mode"] = "MODE_VIDEO"
+            if not H.save_config(config) or not H.reload_config():
+                self._show_error("No se pudo aplicar la rotacion")
+                return
 
             self._refresh_monitors()
             self._show_toast("Rotacion completa")
@@ -1048,33 +1068,31 @@ class RipoWallWindow(Adw.ApplicationWindow):
         if self._interval_blocked:
             return
         idx = dropdown.get_selected()
-        mapping = {0: 0, 1: 300, 2: 600, 3: 1800, 4: 3600}
-        seconds = mapping.get(idx, 0)
-        labels = ["Off", "5 min", "10 min", "30 min", "1 hora"]
-        try:
-            config = H.load_config()
-            config["fade_interval"] = seconds
-            H.save_config(config)
-            H.reload_config()
-            self._show_toast(f"Intervalo: {labels[idx]}")
-        except Exception as e:
-            self._show_error(f"Error al cambiar intervalo: {e}")
+        minutes = ROTATE_OPTIONS_MIN[idx]
+        # Es un ajuste de RipoWall (lo lee el daemon), no de Hidamari:
+        # fade_interval en config.json es el paso del fundido de volumen.
+        settings = H.load_settings()
+        settings["rotate_minutes"] = minutes
+        if H.save_settings(settings):
+            self._show_toast(f"Rotacion: {ROTATE_LABELS[idx]}")
+        else:
+            self._show_error("No se pudo guardar el intervalo de rotacion")
 
     def _on_mute_check_toggled(self, check: Gtk.CheckButton):
-        try:
-            config = H.load_config()
-            config["is_mute"] = check.get_active()
-            H.save_config(config)
-        except Exception:
-            pass
+        config = H.load_config()
+        config["is_mute"] = check.get_active()
+        if not config or not H.save_config(config):
+            self._show_error("No se pudo guardar 'Mute al iniciar'")
 
     def _on_pause_max_toggled(self, check: Gtk.CheckButton):
-        try:
-            config = H.load_config()
-            config["pause_when_maximized"] = check.get_active()
-            H.save_config(config)
-        except Exception:
-            pass
+        enabled = check.get_active()
+        config = H.load_config()
+        config["is_pause_when_maximized"] = enabled
+        if not config or not H.save_config(config):
+            self._show_error("No se pudo guardar 'Pausar si ventana max'")
+            return
+        # Aplicarlo al player en marcha (sin reiniciarlo)
+        H.set_pause_when_maximized(enabled)
 
     # =========================================================================
     # Wallpaper Engine (Steam Workshop)
@@ -1925,10 +1943,10 @@ class RipoWallApp(Adw.Application):
         .desktop cuyo nombre DEBE coincidir con application_id.
         El archivo es: ~/.local/share/applications/cl.ripotech.RipoWall.desktop
         """
-        # GTK windows (afecta dialogos, about, y X11 fallback)
+        # GTK windows (afecta dialogos, about, y X11 fallback).
+        # Gtk.Application no tiene set_icon_name en GTK4: en Wayland el icono
+        # lo toma GNOME Shell del .desktop que coincide con application_id.
         Gtk.Window.set_default_icon_name("ripowall")
-        # Wayland xdg-shell toplevel (requiere desktop file con nombre correcto)
-        self.set_icon_name("ripowall")
 
     def _add_action(
         self, name: str, callback, accels: list[str] | None = None
@@ -1951,12 +1969,12 @@ class RipoWallApp(Adw.Application):
         dialog.set_application_name("RipoWall")
         dialog.set_application_icon("ripowall")
         dialog.set_developer_name("Joaquin Espinosa")
-        dialog.set_version("2.0.0")
+        dialog.set_version("3.2.0")
         dialog.set_website("https://ripotech.cl")
         dialog.set_copyright("© 2026 RipoTech — ripotech.cl")
         dialog.set_developers(["Joaquin Espinosa <104966815+Joaco2382@users.noreply.github.com>"])
         dialog.set_designers(["RipoTech Design"])
-        dialog.set_license_type(getattr(Gtk.License, 'GPL_2_0', 2))
+        dialog.set_license_type(Gtk.License.GPL_3_0)
         dialog.present(self.active_window)
 
     def _on_search(self, action, param):
