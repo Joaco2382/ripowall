@@ -1,0 +1,6 @@
+[Unit]
+Description=Rotar wallpaper de Hidamari aleatoriamente
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/hidamari-daemon --once

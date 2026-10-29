@@ -1,0 +1,50 @@
+# CI de RipoWall (reglas globales, sección 12): nada sale sin pasar por aquí.
+#   secretos: ggshield revisa cada commit nuevo (push y PR).
+#   qa:       compila, linter (errores reales) y la suite de pruebas con GTK4/Adwaita/WebKit reales.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  secretos:
+    name: Secretos (ggshield)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0   # todo el historial, para revisar todos los commits del push o del PR
+      - uses: GitGuardian/ggshield-action@v1.56.1
+        env:
+          GITHUB_PUSH_BEFORE_SHA: ${{ github.event.before }}
+          GITHUB_PUSH_BASE_SHA: ${{ github.event.base }}
+          GITHUB_PULL_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GITHUB_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GITGUARDIAN_API_KEY: ${{ secrets.GITGUARDIAN_API_KEY }}
+
+  qa:
+    name: QA (compila, linter, pruebas)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: GTK4, Adwaita y WebKit (los mismos que usa la app)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 gir1.2-webkit-6.0
+      - name: Compila
+        run: python3 -m py_compile *.py tests/*.py
+      - name: Linter (errores reales, ruff fijo)
+        run: pipx run ruff==0.14.3 check --select E9,F .
+      - name: Pruebas
+        env:
+          RIPOWALL_REQUIERE_GUI: "1"   # si GTK no carga, falla en vez de saltarse las pruebas de la GUI
+        run: /usr/bin/python3 -m unittest discover -s tests -v

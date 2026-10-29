@@ -1,0 +1,14 @@
+[Unit]
+Description=Hidamari Daemon — Wallpapers inteligentes multi-monitor
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/hidamari-daemon
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=graphical-session.target

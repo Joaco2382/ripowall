@@ -1,0 +1,1985 @@
+#!/usr/bin/env python3
+"""
+RipoWall GUI -- GTK4 + Adwaita wallpaper manager.
+Gestiona wallpapers animados con sidebar de monitores, galeria GridView,
+busqueda client-side, control DBus de reproduccion/rotacion y daemon systemd.
+Un solo archivo, sin plantillas XML.
+"""  # noqa: D100
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import threading
+from typing import Callable
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))  # hidamari_core.py va junto al script
+
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
+gi.require_version("Adw", "1")
+gi.require_version("WebKit", "6.0")
+from gi.repository import Gtk, Adw, GLib, Gdk, Gio, GObject, WebKit
+
+import hidamari_core as H
+
+try:
+    import workshop_api as WA
+except ImportError:
+    WA = None  # type: ignore[assignment]
+
+try:
+    from ripowall_diagnostics import auto_diagnose_and_save
+except ImportError:
+    auto_diagnose_and_save = lambda: []  # noqa: E731
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+GUI_STATE_PATH = os.path.expanduser("~/.config/hidamari/gui-state.json")
+SIDEBAR_WIDTH = 160
+ACCENT = "#00d4ff"
+# Opciones del selector de rotacion (minutos; 0 = sin rotacion)
+ROTATE_OPTIONS_MIN = [0, 5, 10, 30, 60]
+ROTATE_LABELS = ["Off", "5 min", "10 min", "30 min", "1 hora"]
+
+# ---------------------------------------------------------------------------
+# CSS
+# ---------------------------------------------------------------------------
+
+APP_CSS = """
+.card {
+    border-radius: 10px;
+    padding: 6px;
+    background: alpha(@card_bg_color, 0.06);
+    transition: background 150ms ease, outline 150ms ease;
+}
+.card:hover {
+    background: alpha(%(accent)s, 0.15);
+    outline: 2px solid %(accent)s;
+    outline-offset: -2px;
+}
+.card:selected {
+    background: alpha(%(accent)s, 0.12);
+}
+.card-active {
+    outline: 3px solid %(accent)s;
+    outline-offset: -3px;
+}
+.card-picture {
+    border-radius: 8px;
+    background: alpha(%(accent)s, 0.08);
+}
+.card-label {
+    font-size: 11px;
+    margin-top: 4px;
+}
+.card-stats {
+    font-size: 10px;
+    margin-top: 0;
+}
+.card-sub-btn {
+    font-size: 10px;
+    padding: 2px 8px;
+    margin-top: 4px;
+    border-radius: 6px;
+}
+.tags-flow {
+    background: alpha(@card_bg_color, 0.04);
+    padding: 2px 4px;
+}
+.monitor-row {
+    padding: 6px 6px;
+    border-radius: 6px;
+    margin: 1px 4px;
+    transition: background 120ms ease;
+}
+.monitor-row:hover {
+    background: alpha(@card_bg_color, 0.08);
+}
+.monitor-row-selected {
+    background: alpha(%(accent)s, 0.2);
+    font-weight: bold;
+}
+.daemon-ok {
+    color: #2ecc71;
+    font-weight: bold;
+    font-size: 16px;
+}
+.daemon-fail {
+    color: #e74c3c;
+    font-weight: bold;
+    font-size: 16px;
+}
+.status-bar {
+    font-size: 12px;
+    opacity: 0.8;
+    padding: 6px 8px;
+    border-top: 1px solid alpha(@borders, 0.4);
+}
+.sidebar-heading {
+    font-size: 11px;
+    font-weight: bold;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    margin: 8px 12px 4px;
+    opacity: 0.7;
+}
+.sidebar-section {
+    margin: 4px 0;
+}
+.config-row {
+    margin: 2px 4px;
+}
+""" % {"accent": ACCENT}
+
+# ---------------------------------------------------------------------------
+# WallpaperItem -- GObject wrapper para Gio.ListStore
+# ---------------------------------------------------------------------------
+
+class WallpaperItem(GObject.GObject):
+    """Envuelve un H.Wallpaper para usarlo en Gio.ListStore + GridView."""
+
+    title = GObject.Property(type=str, default="")
+    path = GObject.Property(type=str, default="")
+    size_mb = GObject.Property(type=float, default=0.0)
+    preview_path = GObject.Property(type=str, default="")
+    workshop_id = GObject.Property(type=str, default="")
+
+    def __init__(self, wp: H.Wallpaper):
+        super().__init__()
+        self.title = wp.title
+        self.path = wp.path
+        self.size_mb = wp.size_mb
+        self.preview_path = wp.preview_path or ""
+        self.workshop_id = wp.workshop_id
+
+
+# ---------------------------------------------------------------------------
+# MonitorRow -- widget de una fila en el sidebar de monitores
+# ---------------------------------------------------------------------------
+
+class MonitorRow(Gtk.Box):
+    """Fila del sidebar que representa un monitor (o Default)."""
+
+    def __init__(self, connector: str, wallpaper_name: str, is_default: bool = False):
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.add_css_class("monitor-row")
+        self.connector = connector
+        self.is_default = is_default
+
+        self.dot = Gtk.Label(label="○", xalign=0)
+        self.dot.set_size_request(22, -1)
+        self.append(self.dot)
+
+        text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        text_box.set_hexpand(True)
+
+        display = "Default" if is_default else connector
+        name_lbl = Gtk.Label(label=display, xalign=0)
+        name_lbl.set_halign(Gtk.Align.START)
+        text_box.append(name_lbl)
+
+        self.wp_label = Gtk.Label(label=wallpaper_name, xalign=0, ellipsize=3)
+        self.wp_label.set_halign(Gtk.Align.START)
+        self.wp_label.set_max_width_chars(12)
+        self.wp_label.add_css_class("dim-label")
+        self.wp_label.add_css_class("caption")
+        text_box.append(self.wp_label)
+
+        self.append(text_box)
+
+    def set_selected(self, selected: bool):
+        if selected:
+            self.dot.set_label("●")
+            self.add_css_class("monitor-row-selected")
+        else:
+            self.dot.set_label("○")
+            self.remove_css_class("monitor-row-selected")
+
+    def update_wallpaper(self, name: str):
+        self.wp_label.set_label(name)
+
+
+# ---------------------------------------------------------------------------
+# RipoWallWindow
+# ---------------------------------------------------------------------------
+
+class RipoWallWindow(Adw.ApplicationWindow):
+    """Ventana principal con sidebar + galeria."""
+
+    def __init__(self, app: Adw.Application):
+        super().__init__(application=app)
+        self.set_title("RipoWall")
+        self.set_default_size(960, 680)
+        self.set_size_request(640, 400)
+
+        # Icono a nivel ventana (X11 + compositores sin herencia de app)
+        self.set_icon_name("ripowall")
+
+        # Estado mutable
+        self._all_wallpapers: list[H.Wallpaper] = []
+        self._monitor_rows: dict[str, MonitorRow] = {}
+        self._selected_connector: str | None = None
+        self._is_paused = False
+        self._is_muted = False
+        self._interval_blocked = False
+        self._context_wallpaper_item: WallpaperItem | None = None
+
+        self._load_window_state()
+        self._build_ui()
+        self._add_context_actions()
+
+        self.connect("close-request", self._on_close_request)
+
+        # Carga inicial asincrona
+        GLib.idle_add(self._init_state)
+
+        # Polling periodico
+        GLib.timeout_add_seconds(5, self._refresh_daemon)
+        GLib.timeout_add_seconds(10, self._refresh_monitors)
+        GLib.timeout_add_seconds(15, self._refresh_we_status)
+
+        # Wallpapers en background
+        self._load_wallpapers_async()
+
+        # Auto-diagnostico silencioso (con delay para que la UI cargue)
+        GLib.timeout_add_seconds(2, lambda: (self._run_auto_diagnostic(), False)[1])
+
+        # Estado de Wallpaper Engine
+
+    # =========================================================================
+    # Acciones de menu contextual (click derecho en cards)
+    # =========================================================================
+
+    def _add_context_actions(self):
+        delete_action = Gio.SimpleAction.new("delete-wallpaper", None)
+        delete_action.connect("activate", self._on_delete_wallpaper_action)
+        self.add_action(delete_action)
+
+        open_action = Gio.SimpleAction.new("open-folder", None)
+        open_action.connect("activate", self._on_open_folder_action)
+        self.add_action(open_action)
+
+    # =========================================================================
+    # Estado de ventana
+    # =========================================================================
+
+    def _load_window_state(self):
+        try:
+            with open(GUI_STATE_PATH) as f:
+                state = json.load(f)
+            w = max(state.get("width", 960), 640)
+            h = max(state.get("height", 680), 400)
+            self.set_default_size(w, h)
+            if state.get("maximized", False):
+                self.maximize()
+        except Exception:
+            pass
+
+    def _save_window_state(self):
+        try:
+            os.makedirs(os.path.dirname(GUI_STATE_PATH), exist_ok=True)
+            maximized = self.is_maximized()
+            if not maximized:
+                w, h = self.get_default_size()
+                state = {"width": w, "height": h, "maximized": False}
+            else:
+                state = {"width": 960, "height": 680, "maximized": True}
+            with open(GUI_STATE_PATH, "w") as f:
+                json.dump(state, f)
+        except Exception:
+            pass
+
+    def _on_close_request(self, window):
+        self._save_window_state()
+        return False
+
+    # =========================================================================
+    # Inicializacion de estado (idle -- la ventana ya esta realizada)
+    # =========================================================================
+
+    def _init_state(self):
+        """Lee estado runtime del servidor y config.json."""
+        try:
+            props = H.get_server_properties()
+            self._is_paused = props.get("is_paused_by_user", False)
+            self._is_muted = props.get("is_mute", False)
+        except Exception:
+            pass
+        self._update_play_icon()
+        self._update_mute_icon()
+        self._refresh_daemon()  # no esperar al primer ciclo de 5 s
+
+        try:
+            config = H.load_config()
+
+            self.mute_checkbox.set_active(config.get("is_mute", False))
+
+            minutes = H.get_rotate_minutes()
+            self._interval_blocked = True
+            self.interval_dropdown.set_selected(
+                ROTATE_OPTIONS_MIN.index(minutes)
+                if minutes in ROTATE_OPTIONS_MIN else 2
+            )
+            self._interval_blocked = False
+
+            # Default de Hidamari: True
+            self.pause_max_checkbox.set_active(
+                config.get("is_pause_when_maximized", True)
+            )
+        except Exception as e:
+            self._show_error(f"Error leyendo configuracion: {e}")
+
+        self._refresh_monitors()
+        return False
+
+    # =========================================================================
+    # UI
+    # =========================================================================
+
+    def _build_ui(self):
+        self.toast_overlay = Adw.ToastOverlay()
+
+        toolbar = Adw.ToolbarView()
+        self._build_headerbar(toolbar)
+
+        sidebar = self._build_sidebar()
+        gallery = self._build_gallery()
+
+        # Paned: sidebar fijo angosto, galeria toma el resto
+        paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        paned.set_wide_handle(False)
+        paned.set_resize_start_child(False)
+        paned.set_shrink_start_child(False)
+        paned.set_shrink_end_child(False)
+        paned.set_start_child(sidebar)
+        paned.set_end_child(gallery)
+        paned.set_position(SIDEBAR_WIDTH)
+        paned.set_vexpand(True)
+
+        main_box = paned
+
+        toolbar.set_content(main_box)
+        self.toast_overlay.set_child(toolbar)
+        self.set_content(self.toast_overlay)
+
+    def _build_headerbar(self, toolbar: Adw.ToolbarView):
+        header = Adw.HeaderBar()
+
+        title_lbl = Gtk.Label(label="RipoWall")
+        title_lbl.add_css_class("title")
+        header.pack_start(title_lbl)
+
+        self.search_entry = Gtk.SearchEntry()
+        self.search_entry.set_placeholder_text("Buscar...")
+        self.search_entry.set_width_chars(28)
+        self.search_entry.connect("search-changed", self._on_search_changed)
+        header.set_title_widget(self.search_entry)
+
+        self.play_btn = Gtk.Button.new_from_icon_name(
+            "media-playback-pause-symbolic"
+        )
+        self.play_btn.set_tooltip_text("Pausar / Reanudar reproduccion")
+        self.play_btn.connect("clicked", self._on_play_pause)
+        header.pack_end(self.play_btn)
+
+        self.mute_btn = Gtk.Button.new_from_icon_name(
+            "audio-volume-high-symbolic"
+        )
+        self.mute_btn.set_tooltip_text("Silenciar / Activar audio")
+        self.mute_btn.connect("clicked", self._on_mute)
+        header.pack_end(self.mute_btn)
+
+        self.we_btn = Gtk.Button.new_from_icon_name("preferences-desktop-wallpaper-symbolic")
+        self.we_btn.set_tooltip_text("Abrir Wallpaper Engine (Steam Workshop)")
+        self.we_btn.connect("clicked", self._on_we_launch)
+        header.pack_end(self.we_btn)
+
+        rotate_btn = Gtk.Button.new_from_icon_name("view-refresh-symbolic")
+        rotate_btn.set_tooltip_text("Rotar wallpapers (Ctrl+R)")
+        rotate_btn.connect("clicked", lambda b: self._on_rotate())
+        header.pack_end(rotate_btn)
+
+        menu = Gio.Menu()
+        menu.append("Acerca de RipoWall", "app.about")
+        menu.append("Salir", "app.quit")
+
+        menu_btn = Gtk.MenuButton()
+        menu_btn.set_icon_name("open-menu-symbolic")
+        menu_btn.set_menu_model(menu)
+        menu_btn.set_tooltip_text("Menu")
+        header.pack_end(menu_btn)
+
+        toolbar.add_top_bar(header)
+
+    def _build_sidebar(self) -> Gtk.Box:
+        sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        sidebar.set_size_request(SIDEBAR_WIDTH, -1)
+
+        # --- Monitores ---
+        mon_heading = Gtk.Label(label="Monitores", xalign=0)
+        mon_heading.add_css_class("sidebar-heading")
+        sidebar.append(mon_heading)
+
+        mon_scroll = Gtk.ScrolledWindow()
+        mon_scroll.set_vexpand(True)
+        mon_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+
+        self.monitor_list = Gtk.ListBox()
+        self.monitor_list.add_css_class("rich-list")
+        self.monitor_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self.monitor_list.connect("row-selected", self._on_monitor_selected)
+        mon_scroll.set_child(self.monitor_list)
+        sidebar.append(mon_scroll)
+
+        # --- Separador ---
+        sep1 = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+        sep1.set_margin_top(8)
+        sidebar.append(sep1)
+
+        # --- Configuracion (colapsable) ---
+        expander = Gtk.Expander(label="Configuracion")
+        expander.set_margin_start(8)
+        expander.set_margin_end(8)
+        expander.set_margin_top(4)
+        expander.set_margin_bottom(4)
+
+        config_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        config_box.set_margin_top(6)
+        config_box.set_margin_bottom(4)
+        config_box.set_margin_start(4)
+
+        self.mute_checkbox = Gtk.CheckButton(label="Mute al iniciar")
+        self.mute_checkbox.set_tooltip_text(
+            "Iniciar RipoWall con audio silenciado"
+        )
+        self.mute_checkbox.connect("toggled", self._on_mute_check_toggled)
+        config_box.append(self.mute_checkbox)
+
+        interval_row = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=6
+        )
+        interval_lbl = Gtk.Label(label="Rotacion:", xalign=0)
+        interval_lbl.set_hexpand(True)
+        interval_lbl.set_halign(Gtk.Align.START)
+        interval_row.append(interval_lbl)
+
+        strings = Gtk.StringList.new(ROTATE_LABELS)
+        self.interval_dropdown = Gtk.DropDown.new(strings)
+        self.interval_dropdown.set_tooltip_text(
+            "Intervalo de rotacion automatica"
+        )
+        self.interval_dropdown.connect(
+            "notify::selected", self._on_interval_changed
+        )
+        interval_row.append(self.interval_dropdown)
+        config_box.append(interval_row)
+
+        self.pause_max_checkbox = Gtk.CheckButton(
+            label="Pausar si ventana max"
+        )
+        self.pause_max_checkbox.set_tooltip_text(
+            "Pausar reproduccion cuando haya una ventana maximizada"
+        )
+        self.pause_max_checkbox.connect(
+            "toggled", self._on_pause_max_toggled
+        )
+        config_box.append(self.pause_max_checkbox)
+
+        expander.set_child(config_box)
+        sidebar.append(expander)
+
+        # --- Separador ---
+        sep2 = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+        sidebar.append(sep2)
+
+        # --- Aviso de problemas (oculto mientras todo funciona) ---
+        # El daemon lo mantiene vivo systemd (Restart=always) y la GUI lo arranca
+        # sola si no esta corriendo: no hay boton, solo se avisa si algo falla.
+        self._problems: dict[str, str] = {}
+        self._last_daemon_start = 0
+        self.problem_box = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=6
+        )
+        self.problem_box.set_margin_start(10)
+        self.problem_box.set_margin_end(10)
+        self.problem_box.set_margin_top(8)
+        self.problem_box.set_margin_bottom(8)
+        problem_icon = Gtk.Image.new_from_icon_name("dialog-warning-symbolic")
+        problem_icon.add_css_class("daemon-fail")
+        problem_icon.set_valign(Gtk.Align.START)
+        self.problem_box.append(problem_icon)
+        self.problem_label = Gtk.Label(xalign=0)
+        self.problem_label.set_wrap(True)
+        self.problem_label.set_hexpand(True)
+        self.problem_label.add_css_class("caption")
+        self.problem_box.append(self.problem_label)
+        self.problem_box.set_visible(False)
+        sidebar.append(self.problem_box)
+
+        # --- by RipoTech ---
+        by_label = Gtk.Label(label="by RipoTech", xalign=0.5)
+        by_label.add_css_class("dim-label")
+        by_label.add_css_class("caption")
+        by_label.set_margin_bottom(8)
+        sidebar.append(by_label)
+
+        return sidebar
+
+    def _build_gallery(self) -> Gtk.Box:
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        content.set_margin_start(8)
+        content.set_margin_end(8)
+        content.set_margin_top(8)
+        content.set_margin_bottom(8)
+
+        self.stack = Gtk.Stack()
+        self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        self.stack.set_vexpand(True)
+
+        self.spinner = Gtk.Spinner()
+        self.spinner.set_size_request(48, 48)
+        self.spinner.set_spinning(True)
+        self.spinner.set_halign(Gtk.Align.CENTER)
+        self.spinner.set_valign(Gtk.Align.CENTER)
+        self.stack.add_named(self.spinner, "loading")
+
+        # Modelo + seleccion
+        self.wallpaper_store = Gio.ListStore.new(WallpaperItem.__gtype__)
+        self.selection_model = Gtk.SingleSelection.new(
+            self.wallpaper_store
+        )
+        self.selection_model.set_autoselect(False)
+        self.selection_model.set_can_unselect(True)
+
+        # Factory de celdas
+        factory = Gtk.SignalListItemFactory()
+        factory.connect("setup", self._on_card_setup)
+        factory.connect("bind", self._on_card_bind)
+
+        self.grid_view = Gtk.GridView.new(self.selection_model, factory)
+        self.grid_view.set_single_click_activate(True)
+        self.grid_view.connect("activate", self._on_wallpaper_activate)
+
+        sc = Gtk.ScrolledWindow()
+        sc.set_vexpand(True)
+        sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sc.set_child(self.grid_view)
+
+        self.stack.add_named(sc, "gallery")
+        self.stack.set_visible_child_name("loading")
+        content.append(self.stack)
+
+        self.status_bar = Gtk.Label(label="", xalign=0)
+        self.status_bar.add_css_class("status-bar")
+        content.append(self.status_bar)
+
+        return content
+
+    # =========================================================================
+    # Factory de celdas (GridView)
+    # =========================================================================
+
+    def _on_card_setup(
+        self, factory: Gtk.SignalListItemFactory, list_item: Gtk.ListItem
+    ):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box.add_css_class("card")
+        box.set_margin_start(4)
+        box.set_margin_end(4)
+        box.set_margin_top(4)
+        box.set_margin_bottom(4)
+
+        picture = Gtk.Picture()
+        picture.set_content_fit(Gtk.ContentFit.COVER)
+        picture.set_size_request(180, 180)
+        picture.add_css_class("card-picture")
+        box.append(picture)
+
+        label = Gtk.Label()
+        label.set_wrap(True)
+        label.set_lines(2)
+        label.set_max_width_chars(18)
+        label.set_xalign(0.5)
+        label.add_css_class("card-label")
+        box.append(label)
+
+        # Click derecho: menu contextual
+        right_click = Gtk.GestureClick.new()
+        right_click.set_button(3)  # boton secundario
+        right_click.connect("pressed", self._on_card_right_click)
+        box.add_controller(right_click)
+
+        list_item.set_child(box)
+
+    def _on_card_bind(
+        self, factory: Gtk.SignalListItemFactory, list_item: Gtk.ListItem
+    ):
+        box = list_item.get_child()
+        if box is None:
+            return
+
+        picture = box.get_first_child()
+        label = box.get_last_child() if picture else None
+        if picture is None or label is None:
+            return
+
+        item = list_item.get_item()
+        if not isinstance(item, WallpaperItem):
+            label.set_label("")
+            # Limpiar referencia
+            box._wallpaper_item = None
+            return
+
+        label.set_label(item.title)
+        preview = item.preview_path
+        if preview and os.path.isfile(preview):
+            try:
+                texture = Gdk.Texture.new_from_filename(preview)
+                picture.set_paintable(texture)
+            except Exception:
+                picture.set_paintable(None)
+        else:
+            picture.set_paintable(None)
+
+        # Guardar referencia al item para el click derecho
+        box._wallpaper_item = item
+
+    # =========================================================================
+    # Click derecho en card -- menu contextual
+    # =========================================================================
+
+    def _on_card_right_click(self, gesture: Gtk.GestureClick, n_press: int,
+                             x: float, y: float):
+        box = gesture.get_widget()
+        item = getattr(box, "_wallpaper_item", None)
+        if not isinstance(item, WallpaperItem):
+            return
+
+        self._context_wallpaper_item = item
+
+        menu = Gio.Menu()
+        menu.append("Eliminar wallpaper", "win.delete-wallpaper")
+        menu.append("Abrir carpeta", "win.open-folder")
+
+        popover = Gtk.PopoverMenu.new_from_model(menu)
+        popover.set_parent(box)
+        rect = Gdk.Rectangle()
+        rect.x = int(x)
+        rect.y = int(y)
+        rect.width = 1
+        rect.height = 1
+        popover.set_pointing_to(rect)
+        popover.set_has_arrow(True)
+        popover.popup()
+
+    # =========================================================================
+    # Accion: Eliminar wallpaper
+    # =========================================================================
+
+    def _on_delete_wallpaper_action(self, action: Gio.SimpleAction, param):
+        item = self._context_wallpaper_item
+        if item is None:
+            return
+
+        dialog = Adw.AlertDialog.new(
+            f"Eliminar {item.title}?",
+            "Esto movera los archivos a la papelera y ya no estara disponible.",
+        )
+        dialog.add_response("cancel", "Cancelar")
+        dialog.add_response("delete", "Eliminar")
+        dialog.set_default_response("cancel")
+        dialog.set_close_response("cancel")
+
+        # Guardar referencia para el callback
+        item_ref = item
+
+        def on_response(dialog_obj, response: str):
+            if response != "delete":
+                return
+            self._do_delete_wallpaper(item_ref)
+
+        dialog.connect("response", on_response)
+        dialog.present(self)
+
+    def _do_delete_wallpaper(self, item: WallpaperItem):
+        workshop_id = item.workshop_id
+        wallpaper_path = item.path
+
+        # 1. Mover archivos a la papelera
+        ok = H.delete_wallpaper_files(workshop_id)
+        if not ok:
+            self._show_error(f"No se pudo eliminar la carpeta del workshop {workshop_id}")
+            return
+
+        # 2. Intentar desuscribir de Steam
+        H.try_unsubscribe(workshop_id)
+
+        # 3. Remover del catalogo en memoria
+        self._all_wallpapers = [
+            w for w in self._all_wallpapers
+            if not w.path.startswith(os.path.join(H.WORKSHOP, workshop_id))
+        ]
+
+        # 4. Limpiar asignaciones en monitores que usaban este wallpaper
+        try:
+            config = H.load_config()
+            data_source = config.get("data_source", {})
+            modified = False
+            for monitor, path in list(data_source.items()):
+                if path == wallpaper_path:
+                    del data_source[monitor]
+                    modified = True
+            if modified:
+                config["data_source"] = data_source
+                H.save_config(config)
+                H.reload_config()
+        except Exception:
+            pass
+
+        # 5. Refrescar galeria (respeta filtro de busqueda activo)
+        self._refresh_gallery()
+
+        # 6. Refrescar monitores (para limpiar el nombre del wallpaper eliminado)
+        self._refresh_monitors()
+
+        # 7. Toast
+        self._show_toast("Wallpaper eliminado")
+
+    # =========================================================================
+    # Accion: Abrir carpeta
+    # =========================================================================
+
+    def _on_open_folder_action(self, action: Gio.SimpleAction, param):
+        item = self._context_wallpaper_item
+        if item is None:
+            return
+
+        workshop_folder = os.path.join(H.WORKSHOP, item.workshop_id)
+        if os.path.isdir(workshop_folder):
+            subprocess.run(["xdg-open", workshop_folder])
+        else:
+            self._show_toast("La carpeta ya no existe")
+
+    # =========================================================================
+    # Refresco de galeria (respeta busqueda activa)
+    # =========================================================================
+
+    def _refresh_gallery(self):
+        query = self.search_entry.get_text().strip()
+        if query:
+            results = H.search_wallpapers(query, self._all_wallpapers)
+            self._populate_store(results)
+        else:
+            self._populate_store(self._all_wallpapers)
+        self._update_status_bar()
+
+    # =========================================================================
+    # Carga de wallpapers (thread)
+    # =========================================================================
+
+    def _load_wallpapers_async(self):
+        def worker():
+            try:
+                wps = H.get_all_wallpapers()
+                wps.sort(key=lambda w: w.title.lower())
+            except Exception as e:
+                wps = []
+                GLib.idle_add(
+                    self._show_error, f"Error al cargar wallpapers: {e}"
+                )
+            GLib.idle_add(self._on_wallpapers_loaded, wps)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_wallpapers_loaded(self, wallpapers: list[H.Wallpaper]):
+        self._all_wallpapers = wallpapers
+        self._populate_store(wallpapers)
+        self.stack.set_visible_child_name("gallery")
+        self._update_status_bar()
+        return False
+
+    def _populate_store(self, wallpapers: list[H.Wallpaper]):
+        n = self.wallpaper_store.get_n_items()
+        items = [WallpaperItem(w) for w in wallpapers]
+        self.wallpaper_store.splice(0, n, items)
+
+    def _update_status_bar(self):
+        current = self.wallpaper_store.get_n_items()
+        total = len(self._all_wallpapers)
+        mon = self._get_selected_monitor()
+        if current == total:
+            text = f"{total} wallpapers"
+        else:
+            text = f"{current} de {total} wallpapers"
+        if mon:
+            text += f"  ·  Monitor: {mon}"
+        self.status_bar.set_label(text)
+
+    # =========================================================================
+    # Busqueda
+    # =========================================================================
+
+    def _on_search_changed(self, entry: Gtk.SearchEntry):
+        query = entry.get_text().strip()
+        if not query:
+            self._populate_store(self._all_wallpapers)
+        else:
+            results = H.search_wallpapers(query, self._all_wallpapers)
+            self._populate_store(results)
+        self._update_status_bar()
+
+    # =========================================================================
+    # Asignacion de wallpaper (click simple)
+    # =========================================================================
+
+    def _on_wallpaper_activate(self, grid_view: Gtk.GridView, position: int):
+        item = self.selection_model.get_item(position)
+        if not isinstance(item, WallpaperItem):
+            return
+
+        connector = self._get_selected_monitor()
+        if not connector:
+            self._show_toast("Selecciona un monitor en la barra lateral")
+            return
+
+        try:
+            ok = H.assign_video_to_monitor(item.path, connector)
+            if ok:
+                name = item.title
+                self._show_toast(f"Asignado a {connector}")
+                if connector in self._monitor_rows:
+                    self._monitor_rows[connector].update_wallpaper(name)
+                self.status_bar.set_label(
+                    f"Asignado '{name}' a {connector}"
+                )
+            else:
+                self._show_error(
+                    f"No se pudo asignar el wallpaper a {connector}"
+                )
+        except Exception as e:
+            self._show_error(f"Error al asignar: {e}")
+
+    # =========================================================================
+    # Seleccion de monitor (sidebar)
+    # =========================================================================
+
+    def _get_selected_monitor(self) -> str | None:
+        row = self.monitor_list.get_selected_row()
+        if row is None:
+            return self._selected_connector
+        child = row.get_child()
+        if isinstance(child, MonitorRow):
+            return child.connector
+        return None
+
+    def _on_monitor_selected(
+        self, listbox: Gtk.ListBox, row: Gtk.ListBoxRow | None
+    ):
+        # Desmarcar todas usando el dict que ya tenemos
+        for mr in self._monitor_rows.values():
+            mr.set_selected(False)
+
+        if row is None:
+            self._selected_connector = None
+        else:
+            child = row.get_child()
+            if isinstance(child, MonitorRow):
+                child.set_selected(True)
+                self._selected_connector = child.connector
+
+        self._update_status_bar()
+
+    # =========================================================================
+    # Refresco de monitores (periodico)
+    # =========================================================================
+
+    def _wallpaper_title(self, path: str) -> str:
+        """Titulo del Workshop para un path (el nombre del .mp4 suele ser 'outfinal.mp4')."""
+        if not path:
+            return "--"
+        wp = next((w for w in self._all_wallpapers if w.path == path), None)
+        return wp.title if wp else os.path.basename(path)
+
+    def _refresh_monitors(self):
+        """Reconstruye la lista de monitores en el sidebar."""
+        try:
+            mons = H.get_connected_monitors()
+            current_wps = {}
+            try:
+                current_wps = H.get_current_wallpapers()
+            except Exception:
+                pass
+
+            was_selected = self._selected_connector
+            self._monitor_rows.clear()
+
+            while True:
+                row = self.monitor_list.get_row_at_index(0)
+                if row is None:
+                    break
+                self.monitor_list.remove(row)
+
+            for m in mons:
+                wp_path = current_wps.get(
+                    m.connector, m.current_wallpaper or ""
+                )
+                wp_name = self._wallpaper_title(wp_path)
+
+                w = MonitorRow(m.connector, wp_name)
+                lr = Gtk.ListBoxRow()
+                lr.set_child(w)
+                self.monitor_list.append(lr)
+                self._monitor_rows[m.connector] = w
+
+                if m.connector == was_selected:
+                    self.monitor_list.select_row(lr)
+                    w.set_selected(True)
+
+            # Default siempre visible
+            def_path = current_wps.get("Default", "")
+            def_name = self._wallpaper_title(def_path)
+            dw = MonitorRow("Default", def_name, is_default=True)
+            dlr = Gtk.ListBoxRow()
+            dlr.set_child(dw)
+            self.monitor_list.append(dlr)
+            self._monitor_rows["Default"] = dw
+
+            if was_selected == "Default":
+                self.monitor_list.select_row(dlr)
+                dw.set_selected(True)
+
+            # Auto-seleccionar primera si nada seleccionado
+            if self._selected_connector is None and self._monitor_rows:
+                first = self.monitor_list.get_row_at_index(0)
+                if first:
+                    self.monitor_list.select_row(first)
+
+            self._set_problem("monitores", None)
+        except Exception as e:
+            self._set_problem("monitores", f"No se pudieron leer los monitores: {e}")
+
+        return True
+
+    # =========================================================================
+    # Refresco de daemon (cada 5s)
+    # =========================================================================
+
+    def _set_problem(self, key: str, msg: str | None):
+        """Muestra u oculta un aviso en el sidebar (None = resuelto)."""
+        if msg:
+            if self._problems.get(key) != msg:
+                print(f"[gui] {msg}", flush=True)
+            self._problems[key] = msg
+        else:
+            self._problems.pop(key, None)
+        self.problem_label.set_label("\n".join(self._problems.values()))
+        self.problem_box.set_visible(bool(self._problems))
+
+    def _refresh_daemon(self):
+        """Mantiene el daemon corriendo sin intervencion del usuario."""
+        status = H.get_daemon_status()
+        if status in ("active", "activating", "reloading"):
+            self._set_problem("daemon", None)
+            return True
+        # systemd lo reinicia solo si se cae; esto cubre el caso de que nunca
+        # haya arrancado (servicio detenido o deshabilitado). Un intento cada 30 s.
+        now = GLib.get_monotonic_time()
+        if now - self._last_daemon_start > 30_000_000:
+            self._last_daemon_start = now
+            if H.daemon_start():
+                self._set_problem("daemon", "Iniciando el servicio de fondos...")
+                return True
+        self._set_problem(
+            "daemon",
+            f"El servicio de fondos no funciona ({status}). Detalle: "
+            "journalctl --user -u hidamari-daemon",
+        )
+        return True
+
+    # =========================================================================
+    # Callbacks de control
+    # =========================================================================
+
+    def _on_play_pause(self, btn: Gtk.Button):
+        try:
+            if self._is_paused:
+                H.start_playback()
+                self._is_paused = False
+            else:
+                H.pause_playback()
+                self._is_paused = True
+            self._update_play_icon()
+        except Exception as e:
+            self._show_error(f"Error Play/Pause: {e}")
+
+    def _update_play_icon(self):
+        if self._is_paused:
+            self.play_btn.set_icon_name("media-playback-start-symbolic")
+            self.play_btn.set_tooltip_text("Reanudar reproduccion")
+        else:
+            self.play_btn.set_icon_name("media-playback-pause-symbolic")
+            self.play_btn.set_tooltip_text("Pausar reproduccion")
+
+    def _on_mute(self, btn: Gtk.Button):
+        try:
+            self._is_muted = not self._is_muted
+            H.set_mute(self._is_muted)
+            self._update_mute_icon()
+        except Exception as e:
+            self._show_error(f"Error Mute: {e}")
+
+    def _update_mute_icon(self):
+        if self._is_muted:
+            self.mute_btn.set_icon_name("audio-volume-muted-symbolic")
+            self.mute_btn.set_tooltip_text("Activar audio")
+        else:
+            self.mute_btn.set_icon_name("audio-volume-high-symbolic")
+            self.mute_btn.set_tooltip_text("Silenciar audio")
+
+    def _on_rotate(self, btn=None):
+        try:
+            mons = H.get_connected_monitors()
+            connectors = [m.connector for m in mons]
+            if not connectors:
+                self._show_toast("No hay monitores conectados")
+                return
+
+            assigned = H.pick_random_wallpapers(
+                connectors, self._all_wallpapers
+            )
+            # Un solo guardado + una recarga (assign_video_to_monitor por
+            # monitor reinicia el player una vez por cada pantalla)
+            config = H.load_config()
+            ds = config.setdefault("data_source", {})
+            ds.update(assigned)
+            if connectors[0] in assigned:
+                ds["Default"] = assigned[connectors[0]]
+            config["mode"] = "MODE_VIDEO"
+            if not H.save_config(config) or not H.reload_config():
+                self._show_error("No se pudo aplicar la rotacion")
+                return
+
+            self._refresh_monitors()
+            self._show_toast("Rotacion completa")
+        except Exception as e:
+            self._show_error(f"Error en rotacion: {e}")
+
+    def _on_interval_changed(self, dropdown, _pspec):
+        if self._interval_blocked:
+            return
+        idx = dropdown.get_selected()
+        minutes = ROTATE_OPTIONS_MIN[idx]
+        # Es un ajuste de RipoWall (lo lee el daemon), no de Hidamari:
+        # fade_interval en config.json es el paso del fundido de volumen.
+        settings = H.load_settings()
+        settings["rotate_minutes"] = minutes
+        if H.save_settings(settings):
+            self._show_toast(f"Rotacion: {ROTATE_LABELS[idx]}")
+        else:
+            self._show_error("No se pudo guardar el intervalo de rotacion")
+
+    def _on_mute_check_toggled(self, check: Gtk.CheckButton):
+        config = H.load_config()
+        config["is_mute"] = check.get_active()
+        if not config or not H.save_config(config):
+            self._show_error("No se pudo guardar 'Mute al iniciar'")
+
+    def _on_pause_max_toggled(self, check: Gtk.CheckButton):
+        enabled = check.get_active()
+        config = H.load_config()
+        config["is_pause_when_maximized"] = enabled
+        if not config or not H.save_config(config):
+            self._show_error("No se pudo guardar 'Pausar si ventana max'")
+            return
+        # Aplicarlo al player en marcha (sin reiniciarlo)
+        H.set_pause_when_maximized(enabled)
+
+    # =========================================================================
+    # Wallpaper Engine (Steam Workshop)
+    # =========================================================================
+
+    def _refresh_we_status(self):
+        """Actualiza el icono del Workshop segun estado de Steam, API y sesion."""
+        try:
+            steam_ok = subprocess.run(
+                ["pgrep", "-x", "steam"], capture_output=True, timeout=3
+            ).returncode == 0
+            has_api = WA and WA.has_api_key()
+            has_sess = WA and WA.has_session()
+
+            self.we_btn.remove_css_class("destructive-action")
+            self.we_btn.remove_css_class("suggested-action")
+
+            if not steam_ok:
+                self.we_btn.add_css_class("destructive-action")
+                self.we_btn.set_tooltip_text(
+                    "Steam no esta corriendo. Inicia Steam para descargar wallpapers."
+                )
+            elif not has_api:
+                self.we_btn.add_css_class("destructive-action")
+                self.we_btn.set_tooltip_text(
+                    "Falta API Key de Steam. Configurala en ~/.config/ripowall/steam_api_key"
+                )
+            elif has_sess:
+                self.we_btn.add_css_class("suggested-action")
+                self.we_btn.set_tooltip_text(
+                    "Steam Workshop — Buscar y suscribirse a wallpapers"
+                )
+            else:
+                self.we_btn.set_tooltip_text(
+                    "Steam Workshop — Buscar wallpapers (requiere login para suscribirse)"
+                )
+        except Exception:
+            pass
+        return True
+
+    def _on_we_launch(self, btn: Gtk.Button):
+        """Abre el navegador nativo del Steam Workshop."""
+        if WA is None:
+            self._show_error(
+                "Modulo workshop_api no encontrado. Reinstala RipoWall."
+            )
+            return
+
+        try:
+            steam_ok = subprocess.run(
+                ["pgrep", "-x", "steam"], capture_output=True, timeout=3
+            ).returncode == 0
+            if not steam_ok:
+                self._show_error(
+                    "Steam no esta corriendo. Inicia Steam para descargar wallpapers."
+                )
+                return
+
+            dialog = WorkshopBrowser(self)
+            dialog.present()
+        except Exception as e:
+            self._show_error(f"Error al abrir Workshop: {e}")
+
+    # =========================================================================
+    # Daemon control
+    # =========================================================================
+
+    # =========================================================================
+    # Helpers
+    # =========================================================================
+
+    def _show_error(self, message: str):
+        print(f"[ripowall] ERROR: {message}", flush=True)
+        try:
+            dialog = Adw.AlertDialog.new("Error", message)
+            dialog.add_response("ok", "OK")
+            dialog.set_default_response("ok")
+            dialog.present(self)
+        except Exception:
+            pass
+
+    def _show_toast(self, message: str):
+        toast = Adw.Toast.new(message)
+        toast.set_timeout(3)
+        self.toast_overlay.add_toast(toast)
+
+    # =========================================================================
+    # Auto-diagnostico silencioso
+    # =========================================================================
+
+    def _run_auto_diagnostic(self):
+        """Ejecuta diagnostico en background al iniciar. Solo notifica si hay criticos."""
+        def worker():
+            try:
+                criticals = auto_diagnose_and_save()
+                if criticals:
+                    msgs = [c['name'] for c in criticals[:3]]
+                    extra = f" (+{len(criticals) - 3} mas)" if len(criticals) > 3 else ""
+                    GLib.idle_add(
+                        self._show_toast,
+                        f"Problemas detectados: {', '.join(msgs)}{extra}. "
+                        f"Ver ~/.cache/ripowall/diagnostics/"
+                    )
+            except Exception:
+                pass
+        threading.Thread(target=worker, daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
+# WorkshopCard — GObject para cada wallpaper en el GridView del Workshop
+# ---------------------------------------------------------------------------
+
+WORKSHOP_URL = "https://steamcommunity.com/app/431960/workshop/"
+
+
+class WorkshopCard(GObject.GObject):
+    """Item del Workshop para Gio.ListStore + GridView."""
+
+    publishedfileid = GObject.Property(type=str, default="")
+    title = GObject.Property(type=str, default="")
+    preview_path = GObject.Property(type=str, default="")
+    subscriptions = GObject.Property(type=int, default=0)
+    favorited = GObject.Property(type=int, default=0)
+    is_subscribed = GObject.Property(type=bool, default=False)
+
+    def __init__(self, item: WA.WorkshopItem, preview_path: str = ""):
+        super().__init__()
+        self.publishedfileid = item.publishedfileid
+        self.title = item.title
+        self.preview_path = preview_path
+        self.subscriptions = item.subscriptions
+        self.favorited = item.favorited
+        self.is_subscribed = item.is_subscribed
+
+
+# ---------------------------------------------------------------------------
+# SteamLoginDialog — WebView minimo para login de Steam
+# ---------------------------------------------------------------------------
+
+class SteamLoginDialog(Adw.Dialog):
+    """Dialogo con WebView SOLO para que el usuario se loguee en Steam.
+
+    Extrae la cookie de sesion y la guarda para usar en subscribe/unsubscribe.
+    """
+
+    LOGIN_URL = "https://steamcommunity.com/login/home/"
+
+    def __init__(self, on_success: Callable[[], None] | None = None):
+        super().__init__()
+        self.set_title("Iniciar sesion en Steam")
+        self.set_content_width(500)
+        self.set_content_height(600)
+        self._on_success = on_success
+
+        toolbar = Adw.ToolbarView()
+
+        header = Adw.HeaderBar()
+        header.set_show_title(True)
+        header.set_title_widget(Gtk.Label(label="Steam Login"))
+
+        close_btn = Gtk.Button.new_with_label("Cerrar")
+        close_btn.connect("clicked", lambda b: self.close())
+        header.pack_end(close_btn)
+
+        toolbar.add_top_bar(header)
+
+        self._webview = WebKit.WebView()
+        self._webview.set_vexpand(True)
+
+        settings = self._webview.get_settings()
+        settings.set_user_agent(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 "
+            "(KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+        )
+        settings.set_enable_developer_extras(False)
+        settings.set_javascript_can_access_clipboard(False)
+
+        self._webview.connect("load-changed", self._on_load_changed)
+        self._webview.load_uri(self.LOGIN_URL)
+
+        self._progress = Gtk.ProgressBar()
+        self._progress.set_show_text(False)
+        self._progress.set_margin_start(6)
+        self._progress.set_margin_end(6)
+        self._progress.set_margin_bottom(6)
+        self._webview.connect(
+            "notify::estimated-load-progress", self._on_progress
+        )
+
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_child(self._webview)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        box.set_vexpand(True)
+        box.append(scroll)
+        box.append(self._progress)
+
+        toolbar.set_content(box)
+        self.set_child(toolbar)
+
+    def _on_progress(self, webview, _pspec):
+        self._progress.set_fraction(webview.get_estimated_load_progress())
+
+    def _on_load_changed(self, webview, load_event, _data=None):
+        if load_event == WebKit.LoadEvent.FINISHED:
+            self._progress.set_visible(False)
+            uri = webview.get_uri() or ""
+            # Si ya no estamos en login, el usuario se logueo
+            if uri.startswith("https://steamcommunity.com/") and "login" not in uri:
+                self._extract_and_save_cookie(webview)
+        elif load_event == WebKit.LoadEvent.STARTED:
+            self._progress.set_visible(True)
+
+    def _extract_and_save_cookie(self, webview):
+        """Extrae la cookie de sesion via CookieManager y la guarda."""
+        try:
+            session = webview.get_network_session()
+            manager = session.get_cookie_manager()
+            manager.get_cookies(None, self._on_cookies_fetched, None)
+        except Exception as e:
+            GLib.idle_add(self._on_login_failed, str(e))
+
+    def _on_cookies_fetched(self, manager, result, *args):
+        try:
+            cookies = manager.get_cookies_finish(result)
+        except Exception as e:
+            GLib.idle_add(self._on_login_failed, str(e))
+            return
+
+        cookie_parts = []
+        for c in cookies:
+            domain = c.get_domain() or ""
+            # Recoger todas las cookies de Steam
+            if "steam" in domain.lower():
+                cookie_parts.append(f"{c.get_name()}={c.get_value()}")
+
+        if cookie_parts:
+            try:
+                WA.save_session_cookie("; ".join(cookie_parts))
+                GLib.idle_add(self._on_login_success)
+            except Exception as e:
+                GLib.idle_add(self._on_login_failed, str(e))
+        else:
+            GLib.idle_add(self._on_login_failed, "No se encontraron cookies de Steam")
+
+    def _on_login_success(self):
+        self.close()
+        if self._on_success:
+            self._on_success()
+
+    def _on_login_failed(self, error: str):
+        print(f"[ripowall] Error extrayendo cookie: {error}", flush=True)
+        self.close()
+
+
+# ---------------------------------------------------------------------------
+# WorkshopBrowser — ventana completa GTK4 nativa del Steam Workshop
+# ---------------------------------------------------------------------------
+
+class WorkshopBrowser(Adw.Window):
+    """Ventana independiente del Steam Workshop usando la Steam Web API.
+
+    UI 100% GTK4 + Adwaita. Filtros compactos en headerbar,
+    age rating, busqueda, GridView con thumbnails.
+    """
+
+    SORT_OPTIONS = [
+        ("Tendencia", "trending"),
+        ("Populares", "popular"),
+        ("Recientes", "recent"),
+        ("Actualizados", "updated"),
+    ]
+
+    AGE_CHECKBOXES = [
+        ("Everyone", "everyone"),
+        ("Partial Nudity", "partial_nudity"),
+        ("Mature (18+)", "mature"),
+    ]
+
+    def __init__(self, parent: RipoWallWindow):
+        super().__init__()
+        self.set_transient_for(parent)
+        self.set_title("Steam Workshop — Wallpaper Engine")
+        self.set_default_size(1300, 850)
+
+        # Estado interno
+        self._store = Gio.ListStore.new(WorkshopCard.__gtype__)
+        self._raw_items: list[WA.WorkshopItem] = []
+        self._current_sort = "trending"
+        self._current_query = ""
+        self._search_timer: int = 0
+        self._tags: list[str] = []
+        self._age_checkboxes: dict[str, Gtk.CheckButton] = {}
+
+        self._build_ui()
+        self._load_trending_tags()
+        self._load_content()
+
+    def _build_ui(self):
+        toolbar = Adw.ToolbarView()
+
+        # ── HeaderBar ──────────────────────────────────────────────────
+        header = Adw.HeaderBar()
+        header.set_show_title(False)
+
+        self._search_entry = Gtk.SearchEntry()
+        self._search_entry.set_placeholder_text("Buscar wallpapers...")
+        self._search_entry.set_width_chars(24)
+        self._search_entry.connect("search-changed", self._on_search_changed)
+        header.set_title_widget(self._search_entry)
+
+        # Login Steam
+        self._login_btn = Gtk.Button.new_with_label("Login")
+        self._login_btn.set_tooltip_text("Iniciar sesion en Steam para suscribirse")
+        self._login_btn.connect("clicked", self._on_login_clicked)
+        header.pack_end(self._login_btn)
+
+        ext_btn = Gtk.Button.new_from_icon_name("web-browser-symbolic")
+        ext_btn.set_tooltip_text("Abrir en navegador externo")
+        ext_btn.connect("clicked", lambda b: subprocess.run(
+            ["xdg-open", WORKSHOP_URL], start_new_session=True))
+        header.pack_end(ext_btn)
+
+        toolbar.add_top_bar(header)
+
+        # ── Sidebar + Grid ─────────────────────────────────────────────
+        hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+
+        # Sidebar
+        sidebar = self._build_sidebar()
+        hbox.append(sidebar)
+
+        # Separator
+        sep = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
+        hbox.append(sep)
+
+        # Grid area
+        grid_area = self._build_grid_area()
+        grid_area.set_hexpand(True)
+        hbox.append(grid_area)
+
+        toolbar.set_content(hbox)
+        self.set_content(toolbar)
+
+        self._update_login_button()
+
+    def _build_sidebar(self) -> Gtk.Box:
+        """Sidebar izquierda: filtros colapsables."""
+        sidebar = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=4,
+            width_request=190
+        )
+        sidebar.set_margin_start(8)
+        sidebar.set_margin_end(8)
+        sidebar.set_margin_top(8)
+
+        # Ordenar
+        sort_label = Gtk.Label(label="Ordenar", xalign=0)
+        sort_label.add_css_class("sidebar-heading")
+        sort_label.set_margin_top(4)
+        sidebar.append(sort_label)
+
+        sort_strings = Gtk.StringList()
+        for label, _key in self.SORT_OPTIONS:
+            sort_strings.append(label)
+        self._sort_dropdown = Gtk.DropDown.new(sort_strings)
+        self._sort_dropdown.set_tooltip_text("Ordenar resultados")
+        self._sort_dropdown.connect("notify::selected", self._on_sort_changed)
+        sidebar.append(self._sort_dropdown)
+
+        # Age rating — checkboxes como Wallpaper Engine
+        age_label = Gtk.Label(label="Clasificacion de edad", xalign=0)
+        age_label.add_css_class("sidebar-heading")
+        age_label.set_margin_top(12)
+        sidebar.append(age_label)
+
+        self._age_checkboxes: dict[str, Gtk.CheckButton] = {}
+        for label, key in self.AGE_CHECKBOXES:
+            cb = Gtk.CheckButton.new_with_label(label)
+            cb.set_active(True)  # mostrar todo por defecto
+            self._age_checkboxes[key] = cb
+            sidebar.append(cb)
+
+        # Tags (multi-select)
+        tags_label = Gtk.Label(label="Tags (multi-select)", xalign=0)
+        tags_label.add_css_class("sidebar-heading")
+        tags_label.set_margin_top(12)
+        sidebar.append(tags_label)
+
+        tags_scroll = Gtk.ScrolledWindow()
+        tags_scroll.set_vexpand(True)
+        tags_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        tags_scroll.set_min_content_height(200)
+
+        self._tags_flow = Gtk.FlowBox()
+        self._tags_flow.set_max_children_per_line(2)
+        self._tags_flow.set_selection_mode(Gtk.SelectionMode.NONE)
+        self._tags_flow.set_row_spacing(2)
+        self._tags_flow.set_column_spacing(2)
+        tags_scroll.set_child(self._tags_flow)
+        sidebar.append(tags_scroll)
+
+        # Boton Aplicar filtros
+        apply_btn = Gtk.Button.new_with_label("Aplicar filtros")
+        apply_btn.set_tooltip_text("Recargar con los tags seleccionados")
+        apply_btn.add_css_class("suggested-action")
+        apply_btn.set_margin_top(8)
+        apply_btn.connect("clicked", self._on_apply_filters)
+        sidebar.append(apply_btn)
+
+        return sidebar
+
+    def _build_grid_area(self) -> Gtk.Box:
+        """Area derecha: GridView + paginacion + estados."""
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+
+        # GridView con cards mas chicas (160x130 para mas densidad)
+        factory = Gtk.SignalListItemFactory()
+        factory.connect("setup", self._on_card_setup)
+        factory.connect("bind", self._on_card_bind)
+
+        self._selection = Gtk.SingleSelection.new(self._store)
+        self._selection.set_autoselect(False)
+        self._selection.set_can_unselect(True)
+
+        self._grid = Gtk.GridView.new(self._selection, factory)
+        self._grid.set_single_click_activate(True)
+        self._grid.connect("activate", self._on_card_activate)
+        self._grid.set_max_columns(0)  # auto
+
+        grid_scroll = Gtk.ScrolledWindow()
+        grid_scroll.set_vexpand(True)
+        grid_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        grid_scroll.set_child(self._grid)
+
+        # Stack
+        self._stack = Gtk.Stack()
+        self._stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+
+        self._loading_box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=12,
+            valign=Gtk.Align.CENTER, halign=Gtk.Align.CENTER
+        )
+        spinner = Gtk.Spinner()
+        spinner.set_size_request(48, 48)
+        spinner.start()
+        self._loading_box.append(spinner)
+        self._loading_box.append(Gtk.Label(label="Cargando Workshop..."))
+        self._stack.add_named(self._loading_box, "loading")
+
+        self._stack.add_named(grid_scroll, "grid")
+
+        empty_box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=8,
+            valign=Gtk.Align.CENTER, halign=Gtk.Align.CENTER
+        )
+        empty_icon = Gtk.Image.new_from_icon_name("edit-find-symbolic")
+        empty_icon.set_pixel_size(64)
+        empty_icon.set_opacity(0.4)
+        empty_box.append(empty_icon)
+        empty_box.append(Gtk.Label(label="Sin resultados"))
+        empty_box.append(
+            Gtk.Label(label="Proba con otros terminos o filtros")
+        )
+        self._stack.add_named(empty_box, "empty")
+
+        error_box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=8,
+            valign=Gtk.Align.CENTER, halign=Gtk.Align.CENTER
+        )
+        error_icon = Gtk.Image.new_from_icon_name("dialog-error-symbolic")
+        error_icon.set_pixel_size(64)
+        error_icon.set_opacity(0.4)
+        error_box.append(error_icon)
+        self._error_label = Gtk.Label(label="Error de conexion")
+        error_box.append(self._error_label)
+        self._stack.add_named(error_box, "error")
+
+        content.append(self._stack)
+
+        # Status bar (conteo de wallpapers)
+        status_bar = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            halign=Gtk.Align.CENTER, margin_top=4, margin_bottom=6
+        )
+        self._page_label = Gtk.Label(label="")
+        self._page_label.add_css_class("dim-label")
+        status_bar.append(self._page_label)
+        content.append(status_bar)
+
+        return content
+
+    # ── Eventos de UI ───────────────────────────────────────────────────
+
+    def _on_search_changed(self, entry: Gtk.SearchEntry):
+        if self._search_timer:
+            GLib.source_remove(self._search_timer)
+        self._search_timer = GLib.timeout_add(400, self._do_search, entry.get_text())
+
+    def _do_search(self, query: str):
+        self._current_query = query
+        self._load_content()
+        self._search_timer = 0
+        return False
+
+    def _on_sort_changed(self, dropdown, _pspec):
+        idx = dropdown.get_selected()
+        if 0 <= idx < len(self.SORT_OPTIONS):
+            self._current_sort = self.SORT_OPTIONS[idx][1]
+            self._load_content()
+
+    def _on_tag_clicked(self, btn: Gtk.ToggleButton, tag: str):
+        """Acumula tags sin recargar. El usuario debe hacer clic en 'Aplicar'."""
+        if btn.get_active():
+            if tag not in self._tags:
+                self._tags.append(tag)
+        else:
+            self._tags = [t for t in self._tags if t != tag]
+
+    def _on_apply_filters(self, btn: Gtk.Button):
+        """Aplica todos los filtros acumulados (tags + edad) y recarga."""
+        self._load_content()
+
+    def _on_login_clicked(self, btn: Gtk.Button):
+        dialog = SteamLoginDialog(on_success=self._update_login_button)
+        dialog.present(self)
+
+    def _on_card_activate(self, grid_view: Gtk.GridView, position: int):
+        item = self._store.get_item(position)
+        if item is None:
+            return
+        self._toggle_subscribe(item)
+
+    # ── Age filter client-side ──────────────────────────────────────────
+
+    def _apply_age_filter(self):
+        """Re-filtra _raw_items segun checkboxes de edad."""
+        filtered = self._filter_by_age(self._raw_items)
+        if not filtered:
+            self._stack.set_visible_child_name("empty")
+            return
+        n = self._store.get_n_items()
+        cards = [WorkshopCard(item, "") for item in filtered]
+        self._store.splice(0, n, cards)
+        self._stack.set_visible_child_name("grid")
+        self._page_label.set_label(f"{len(filtered)} wallpapers")
+        threading.Thread(target=self._download_previews, daemon=True).start()
+
+    def _filter_by_age(self, items: list[WA.WorkshopItem]) -> list[WA.WorkshopItem]:
+        """Filtra segun checkboxes de edad (como WE)."""
+        enabled = {k for k, cb in self._age_checkboxes.items() if cb.get_active()}
+        if not enabled:
+            return []  # nada seleccionado = sin resultados
+        if len(enabled) == len(self.AGE_CHECKBOXES):
+            return items  # todos activados = mostrar todo
+        return [i for i in items if i.age_rating in enabled]
+
+    # ── Carga de contenido ──────────────────────────────────────────────
+
+    def _load_content(self):
+        self._stack.set_visible_child_name("loading")
+        threading.Thread(target=self._load_content_worker, daemon=True).start()
+
+    def _load_content_worker(self):
+        try:
+            tags = self._tags if self._tags else None
+            items = WA.search_multi(
+                query=self._current_query,
+                sort=self._current_sort,
+                tags=tags,
+                target_count=300,
+            )
+        except Exception as e:
+            GLib.idle_add(self._show_error, f"Error de red: {e}")
+            return
+
+        if not items:
+            GLib.idle_add(self._show_error, "No se pudo conectar a la API de Steam")
+            return
+
+        # Marcar items ya suscritos + guardar raw
+        local_ids = self._get_subscribed_ids()
+        for item in items:
+            if item.publishedfileid in local_ids:
+                item.is_subscribed = True
+        self._raw_items = items
+
+        GLib.idle_add(self._display_results, items)
+
+    def _display_results(self, items: list[WA.WorkshopItem]):
+        self._current_items = items
+
+        # Aplicar filtro de edad
+        filtered = self._filter_by_age(items)
+
+        n = self._store.get_n_items()
+        cards = [WorkshopCard(item, "") for item in filtered]
+        self._store.splice(0, n, cards)
+
+        # Descargar previews en background
+        threading.Thread(target=self._download_previews, daemon=True).start()
+
+        count_label = f"{len(filtered)} wallpapers"
+        self._page_label.set_label(count_label)
+
+        if len(filtered) == 0:
+            self._stack.set_visible_child_name("empty")
+        else:
+            self._stack.set_visible_child_name("grid")
+
+    def _download_previews(self):
+        """Descarga previews en background y actualiza el store via idle_add."""
+        items = getattr(self, '_current_items', [])
+        for i, item in enumerate(items):
+            if not item.preview_url:
+                continue
+            try:
+                local_path = WA.download_preview(item.preview_url, item.publishedfileid)
+            except Exception:
+                continue
+            if local_path:
+                GLib.idle_add(
+                    lambda idx=i, p=local_path: self._update_card_preview(idx, p)
+                )
+
+    def _update_card_preview(self, idx: int, path: str):
+        """Notifica al GridView que el preview del item cambio."""
+        if idx >= self._store.get_n_items():
+            return
+        card = self._store.get_item(idx)
+        if card is None or card.preview_path == path:
+            return
+        card.preview_path = path
+        self._store.remove(idx)
+        self._store.insert(idx, card)
+
+    def _show_error(self, msg: str):
+        self._error_label.set_label(msg)
+        self._stack.set_visible_child_name("error")
+
+    def _get_subscribed_ids(self) -> set[str]:
+        try:
+            wallpapers = H.get_all_wallpapers()
+            return {w.workshop_id for w in wallpapers if w.workshop_id}
+        except Exception:
+            return set()
+
+    # ── Subscribe / Unsubscribe ─────────────────────────────────────────
+
+    def _toggle_subscribe(self, card):
+        if not WA.has_session():
+            dialog = SteamLoginDialog(
+                on_success=lambda: self._do_subscribe(card)
+            )
+            dialog.present(self)
+            return
+        self._do_subscribe(card)
+
+    def _do_subscribe(self, card):
+        if card is None:
+            return
+
+        publishedfileid = card.publishedfileid
+        if card.is_subscribed:
+            success = WA.unsubscribe(publishedfileid)
+            if success:
+                card.is_subscribed = False
+                card.notify("is_subscribed")
+        else:
+            success = WA.subscribe(publishedfileid)
+            if success:
+                card.is_subscribed = True
+                card.notify("is_subscribed")
+                try:
+                    H.try_unsubscribe(publishedfileid)
+                except Exception:
+                    pass
+
+    # ── Tags ────────────────────────────────────────────────────────────
+
+    def _load_trending_tags(self):
+        threading.Thread(target=self._load_tags_worker, daemon=True).start()
+
+    def _load_tags_worker(self):
+        try:
+            tags = WA.fetch_trending_tags(limit=20)
+            GLib.idle_add(self._populate_tags, tags)
+        except Exception:
+            GLib.idle_add(self._populate_tags, WA._default_tags())
+
+    def _populate_tags(self, tags: list[str]):
+        self._tags_flow.remove_all()
+        for tag in tags:
+            btn = Gtk.ToggleButton.new_with_label(tag)
+            btn.add_css_class("pill")
+            btn.add_css_class("caption")
+            btn.connect("clicked", self._on_tag_clicked, tag)
+            self._tags_flow.append(btn)
+
+    def _update_login_button(self):
+        if WA and WA.has_session():
+            self._login_btn.set_label("✓ Login")
+            self._login_btn.set_tooltip_text("Sesion de Steam activa")
+            self._login_btn.set_sensitive(False)
+        else:
+            self._login_btn.set_label("Login Steam")
+            self._login_btn.set_tooltip_text("Inicia sesion para suscribirte a wallpapers")
+            self._login_btn.set_sensitive(True)
+
+    # ── GridView factory ────────────────────────────────────────────────
+
+    def _on_card_setup(self, factory, list_item):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box.set_margin_start(4)
+        box.set_margin_end(4)
+        box.set_margin_top(4)
+        box.set_margin_bottom(4)
+        box.add_css_class("card")
+
+        picture = Gtk.Picture()
+        picture.set_content_fit(Gtk.ContentFit.COVER)
+        picture.set_size_request(130, 105)
+        picture.add_css_class("card-picture")
+        box.append(picture)
+
+        title = Gtk.Label()
+        title.set_ellipsize(3)
+        title.set_max_width_chars(14)
+        title.set_halign(Gtk.Align.START)
+        title.add_css_class("card-label")
+        box.append(title)
+
+        stats = Gtk.Label()
+        stats.set_ellipsize(3)
+        stats.set_halign(Gtk.Align.START)
+        stats.add_css_class("card-stats")
+        stats.add_css_class("dim-label")
+        box.append(stats)
+
+        sub_btn = Gtk.Button.new_with_label("Suscribirse")
+        sub_btn.add_css_class("card-sub-btn")
+        sub_btn.add_css_class("suggested-action")
+        sub_btn.set_halign(Gtk.Align.CENTER)
+        sub_btn.connect("clicked", self._on_card_sub_clicked)
+        box.append(sub_btn)
+
+        list_item.set_child(box)
+
+    def _on_card_bind(self, factory, list_item):
+        box = list_item.get_child()
+        picture = box.get_first_child()
+        title_label = picture.get_next_sibling()
+        stats_label = title_label.get_next_sibling()
+        sub_btn = stats_label.get_next_sibling()
+
+        item = list_item.get_item()
+        if item is None:
+            return
+
+        title_label.set_label(item.title)
+
+        stats = f"⭐ {item.subscriptions:,}  ❤ {item.favorited:,}"
+        stats_label.set_label(stats)
+
+        if item.preview_path and os.path.isfile(item.preview_path):
+            try:
+                texture = Gdk.Texture.new_from_filename(item.preview_path)
+                picture.set_paintable(texture)
+            except Exception:
+                picture.set_paintable(None)
+        else:
+            picture.set_paintable(None)
+
+        if item.is_subscribed:
+            sub_btn.set_label("✓ Suscrito")
+            sub_btn.remove_css_class("suggested-action")
+            sub_btn.add_css_class("flat")
+        else:
+            sub_btn.set_label("Suscribirse")
+            sub_btn.remove_css_class("flat")
+            sub_btn.add_css_class("suggested-action")
+
+        box._workshop_item = item
+
+    def _on_card_sub_clicked(self, btn: Gtk.Button):
+        box = btn.get_parent()
+        item = getattr(box, '_workshop_item', None)
+        if item:
+            self._toggle_subscribe(item)
+
+
+# ---------------------------------------------------------------------------
+# RipoWallApp
+# ---------------------------------------------------------------------------
+
+class RipoWallApp(Adw.Application):
+    """Punto de entrada de la aplicacion."""
+
+    def __init__(self):
+        super().__init__(application_id="cl.ripotech.RipoWall")
+        self.set_flags(Gio.ApplicationFlags.FLAGS_NONE)
+
+    def do_startup(self):
+        Adw.Application.do_startup(self)
+
+        provider = Gtk.CssProvider()
+        provider.load_from_data(APP_CSS.encode())
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(),
+            provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+        )
+
+        # Logo de RipoTech como icono de la app
+        self._set_app_icon()
+
+        self._add_action("quit", self._on_quit, ["<Control>q"])
+        self._add_action("about", self._on_about)
+        self._add_action("search", self._on_search, ["<Control>f"])
+        self._add_action("rotate", self._on_rotate_action, ["<Control>r"])
+
+    def _set_app_icon(self):
+        """Registra ripowall como icono de la app en todos los niveles.
+
+        Wayland (GNOME Shell): el icono del toplevel se define via el archivo
+        .desktop cuyo nombre DEBE coincidir con application_id.
+        El archivo es: ~/.local/share/applications/cl.ripotech.RipoWall.desktop
+        """
+        # GTK windows (afecta dialogos, about, y X11 fallback).
+        # Gtk.Application no tiene set_icon_name en GTK4: en Wayland el icono
+        # lo toma GNOME Shell del .desktop que coincide con application_id.
+        Gtk.Window.set_default_icon_name("ripowall")
+
+    def _add_action(
+        self, name: str, callback, accels: list[str] | None = None
+    ):
+        action = Gio.SimpleAction.new(name, None)
+        action.connect("activate", callback)
+        self.add_action(action)
+        if accels:
+            self.set_accels_for_action(f"app.{name}", accels)
+
+    def do_activate(self):
+        window = RipoWallWindow(self)
+        window.present()
+
+    def _on_quit(self, action, param):
+        self.quit()
+
+    def _on_about(self, action, param):
+        dialog = Adw.AboutDialog.new()
+        dialog.set_application_name("RipoWall")
+        dialog.set_application_icon("ripowall")
+        dialog.set_developer_name("Joaquin Espinosa")
+        dialog.set_version("3.2.0")
+        dialog.set_website("https://ripotech.cl")
+        dialog.set_copyright("© 2026 RipoTech — ripotech.cl")
+        dialog.set_developers(["Joaquin Espinosa <104966815+Joaco2382@users.noreply.github.com>"])
+        dialog.set_designers(["RipoTech Design"])
+        dialog.set_license_type(Gtk.License.GPL_3_0)
+        dialog.present(self.active_window)
+
+    def _on_search(self, action, param):
+        win = self.active_window
+        if isinstance(win, RipoWallWindow):
+            win.search_entry.grab_focus()
+
+    def _on_rotate_action(self, action, param):
+        win = self.active_window
+        if isinstance(win, RipoWallWindow):
+            win._on_rotate()
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main():
+    app = RipoWallApp()
+    return app.run(sys.argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
