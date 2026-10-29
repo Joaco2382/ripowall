@@ -571,7 +571,7 @@ def pick_random_wallpapers(
 # ── Daemon (systemd user) ──────────────────────────────────────────────────
 
 def get_daemon_status() -> str:
-    """Estado del daemon: 'running', 'stopped', 'failed', 'unknown'."""
+    """Estado de systemd: 'active', 'activating', 'inactive', 'failed', 'unknown'..."""
     try:
         r = subprocess.run(
             ["systemctl", "--user", "is-active", "hidamari-daemon.service"],
@@ -583,14 +583,15 @@ def get_daemon_status() -> str:
 
 
 def daemon_start() -> bool:
-    """Inicia el daemon."""
+    """Inicia el daemon y lo deja habilitado para los proximos inicios de sesion."""
     try:
         subprocess.run(
-            ["systemctl", "--user", "start", "hidamari-daemon.service"],
+            ["systemctl", "--user", "enable", "--now", "hidamari-daemon.service"],
             capture_output=True, timeout=10, check=True
         )
         return True
-    except Exception:
+    except Exception as e:
+        print(f"[core] Error iniciando el daemon: {e}", flush=True)
         return False
 
 

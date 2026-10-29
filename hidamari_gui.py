@@ -314,6 +314,7 @@ class RipoWallWindow(Adw.ApplicationWindow):
             pass
         self._update_play_icon()
         self._update_mute_icon()
+        self._refresh_daemon()  # no esperar al primer ciclo de 5 s
 
         try:
             config = H.load_config()
@@ -498,33 +499,29 @@ class RipoWallWindow(Adw.ApplicationWindow):
         sep2 = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
         sidebar.append(sep2)
 
-        # --- Daemon ---
-        daemon_box = Gtk.Box(
+        # --- Aviso de problemas (oculto mientras todo funciona) ---
+        # El daemon lo mantiene vivo systemd (Restart=always) y la GUI lo arranca
+        # sola si no esta corriendo: no hay boton, solo se avisa si algo falla.
+        self._problems: dict[str, str] = {}
+        self._last_daemon_start = 0
+        self.problem_box = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL, spacing=6
         )
-        daemon_box.set_margin_start(10)
-        daemon_box.set_margin_end(10)
-        daemon_box.set_margin_top(8)
-        daemon_box.set_margin_bottom(8)
-
-        self.daemon_dot = Gtk.Label(label="●")
-        self.daemon_dot.add_css_class("daemon-fail")
-        daemon_box.append(self.daemon_dot)
-
-        self.daemon_label = Gtk.Label(
-            label="Daemon: verificando...", xalign=0
-        )
-        self.daemon_label.set_hexpand(True)
-        self.daemon_label.add_css_class("dim-label")
-        self.daemon_label.add_css_class("caption")
-        daemon_box.append(self.daemon_label)
-
-        self.daemon_btn = Gtk.Button.new_with_label("Reiniciar")
-        self.daemon_btn.set_tooltip_text("Reiniciar o iniciar el daemon")
-        self.daemon_btn.connect("clicked", self._on_daemon_toggle)
-        daemon_box.append(self.daemon_btn)
-
-        sidebar.append(daemon_box)
+        self.problem_box.set_margin_start(10)
+        self.problem_box.set_margin_end(10)
+        self.problem_box.set_margin_top(8)
+        self.problem_box.set_margin_bottom(8)
+        problem_icon = Gtk.Image.new_from_icon_name("dialog-warning-symbolic")
+        problem_icon.add_css_class("daemon-fail")
+        problem_icon.set_valign(Gtk.Align.START)
+        self.problem_box.append(problem_icon)
+        self.problem_label = Gtk.Label(xalign=0)
+        self.problem_label.set_wrap(True)
+        self.problem_label.set_hexpand(True)
+        self.problem_label.add_css_class("caption")
+        self.problem_box.append(self.problem_label)
+        self.problem_box.set_visible(False)
+        sidebar.append(self.problem_box)
 
         # --- by RipoTech ---
         by_label = Gtk.Label(label="by RipoTech", xalign=0.5)
@@ -964,8 +961,9 @@ class RipoWallWindow(Adw.ApplicationWindow):
                 if first:
                     self.monitor_list.select_row(first)
 
+            self._set_problem("monitores", None)
         except Exception as e:
-            self.daemon_label.set_label(f"Daemon: error ({e})")
+            self._set_problem("monitores", f"No se pudieron leer los monitores: {e}")
 
         return True
 
@@ -973,27 +971,36 @@ class RipoWallWindow(Adw.ApplicationWindow):
     # Refresco de daemon (cada 5s)
     # =========================================================================
 
+    def _set_problem(self, key: str, msg: str | None):
+        """Muestra u oculta un aviso en el sidebar (None = resuelto)."""
+        if msg:
+            if self._problems.get(key) != msg:
+                print(f"[gui] {msg}", flush=True)
+            self._problems[key] = msg
+        else:
+            self._problems.pop(key, None)
+        self.problem_label.set_label("\n".join(self._problems.values()))
+        self.problem_box.set_visible(bool(self._problems))
+
     def _refresh_daemon(self):
-        try:
-            status = H.get_daemon_status()
-            is_active = status == "active"
-
-            self.daemon_dot.remove_css_class("daemon-ok")
-            self.daemon_dot.remove_css_class("daemon-fail")
-            if is_active:
-                self.daemon_dot.add_css_class("daemon-ok")
-            else:
-                self.daemon_dot.add_css_class("daemon-fail")
-
-            self.daemon_label.set_label(f"Daemon: {status}")
-            self.daemon_btn.set_label(
-                "Reiniciar" if is_active else "Iniciar"
-            )
-        except Exception:
-            self.daemon_dot.remove_css_class("daemon-ok")
-            self.daemon_dot.add_css_class("daemon-fail")
-            self.daemon_label.set_label("Daemon: error")
-
+        """Mantiene el daemon corriendo sin intervencion del usuario."""
+        status = H.get_daemon_status()
+        if status in ("active", "activating", "reloading"):
+            self._set_problem("daemon", None)
+            return True
+        # systemd lo reinicia solo si se cae; esto cubre el caso de que nunca
+        # haya arrancado (servicio detenido o deshabilitado). Un intento cada 30 s.
+        now = GLib.get_monotonic_time()
+        if now - self._last_daemon_start > 30_000_000:
+            self._last_daemon_start = now
+            if H.daemon_start():
+                self._set_problem("daemon", "Iniciando el servicio de fondos...")
+                return True
+        self._set_problem(
+            "daemon",
+            f"El servicio de fondos no funciona ({status}). Detalle: "
+            "journalctl --user -u hidamari-daemon",
+        )
         return True
 
     # =========================================================================
@@ -1159,28 +1166,6 @@ class RipoWallWindow(Adw.ApplicationWindow):
     # =========================================================================
     # Daemon control
     # =========================================================================
-
-    def _on_daemon_toggle(self, btn: Gtk.Button):
-        try:
-            status = H.get_daemon_status()
-            if status == "active":
-                ok = H.daemon_restart()
-                msg = (
-                    "Reiniciando daemon..."
-                    if ok
-                    else "Error al reiniciar daemon"
-                )
-            else:
-                ok = H.daemon_start()
-                msg = (
-                    "Iniciando daemon..."
-                    if ok
-                    else "Error al iniciar daemon"
-                )
-            self._show_toast(msg)
-            GLib.timeout_add(1000, self._refresh_daemon)
-        except Exception as e:
-            self._show_error(f"Error controlando daemon: {e}")
 
     # =========================================================================
     # Helpers
