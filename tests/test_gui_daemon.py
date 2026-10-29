@@ -12,9 +12,10 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     import hidamari_gui as G
-except (ImportError, ValueError) as e:  # sin GTK4/Adwaita instalados
+except (ImportError, ValueError):  # sin GTK4/Adwaita instalados
+    if os.environ.get("RIPOWALL_REQUIERE_GUI"):  # en el CI no se permite saltar estas pruebas
+        raise
     G = None
-    GUI_IMPORT_ERROR = e
 
 
 class _Label:

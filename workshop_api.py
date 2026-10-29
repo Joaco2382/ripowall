@@ -21,7 +21,6 @@ import urllib.parse
 import urllib.error
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
 
 # ── Constantes ──────────────────────────────────────────────────────────────
 

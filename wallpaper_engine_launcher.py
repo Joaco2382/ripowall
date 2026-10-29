@@ -644,8 +644,8 @@ def _cli():
         else:
             print("═══ Wallpaper Engine Status ═══")
             print(f"  Steam:        {'✓ running' if s.steam_running else '✗ not running'}")
-            print(f"  Servicio:     {'✓' if s.service_running else '✗'} (PID {s.service_pid})" if s.service_pid else f"  Servicio:     ✗")
-            print(f"  UI:           {'✓' if s.ui_running else '✗'} (PID {s.ui_pid})" if s.ui_pid else f"  UI:           ✗")
+            print(f"  Servicio:     {'✓' if s.service_running else '✗'} (PID {s.service_pid})" if s.service_pid else "  Servicio:     ✗")
+            print(f"  UI:           {'✓' if s.ui_running else '✗'} (PID {s.ui_pid})" if s.ui_pid else "  UI:           ✗")
             print(f"  Display:      {s.display_server}")
             print(f"  Proton:       {s.proton_path or 'NO DETECTADO'}")
             print(f"  Steam dir:    {s.steam_dir or 'NO DETECTADO'}")

@@ -27,7 +27,6 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 CATEGORIES = ["ENVIRONMENT", "WALLPAPER_ENGINE", "RIPOWALL", "HIDAMARI", "WORKSHOP"]
 SEVERITY_ORDER: dict[str, int] = {"ok": 0, "warning": 1, "error": 2}
@@ -642,7 +641,7 @@ def render_json(report: DiagnosticReport) -> str:
 
 def render_markdown(report: DiagnosticReport) -> str:
     lines = [
-        f"# RipoWall Diagnostics Report",
+        "# RipoWall Diagnostics Report",
         f"**{report.timestamp}** | {report.hostname}",
         f"**{report.summary['ok']} OK | {report.summary['warning']} Warnings | {report.summary['error']} Errors**",
         "", "---", "",

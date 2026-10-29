@@ -13,7 +13,6 @@ import os
 import subprocess
 import sys
 import threading
-from pathlib import Path
 from typing import Callable
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))  # hidamari_core.py va junto al script
