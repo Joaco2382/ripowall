@@ -6,7 +6,7 @@ Evalua el estado completo del stack RipoWall:
   - ENVIRONMENT: Steam, Proton, Wine prefix, display server, dependencias Python.
   - WALLPAPER_ENGINE: instalacion, config, faultyShutdown, safemode, procesos.
   - RIPOWALL: binarios, systemd services, daemon, GUI.
-  - HIDAMARI: reproductor, DBus, config, symlinks.
+  - REPRODUCTOR: ripowall-renderer, extensión de GNOME y config.json de RipoWall.
   - WORKSHOP: contenido, symlinks planos.
 
 Uso:
@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-CATEGORIES = ["ENVIRONMENT", "WALLPAPER_ENGINE", "RIPOWALL", "HIDAMARI", "WORKSHOP"]
+CATEGORIES = ["ENVIRONMENT", "WALLPAPER_ENGINE", "RIPOWALL", "REPRODUCTOR", "WORKSHOP"]
 SEVERITY_ORDER: dict[str, int] = {"ok": 0, "warning": 1, "error": 2}
 
 HOME = Path.home()
@@ -39,16 +39,15 @@ STEAM_APPS = STEAM_ROOT / "steamapps" / "common"
 WE_DIR = STEAM_APPS / "wallpaper_engine"
 WE_PREFIX = STEAM_ROOT / "steamapps" / "compatdata" / "431960" / "pfx"
 WORKSHOP_DIR = STEAM_ROOT / "steamapps" / "workshop" / "content" / "431960"
-HIDAMARI_CONFIG = HOME / ".config" / "hidamari" / "config.json"
-HIDAMARI_FLAT = HOME / "Videos" / "Hidamari"
+RIPOWALL_CONFIG = HOME / ".config" / "ripowall" / "config.json"
 
 SYSTEMD_SERVICES = {
     "hidamari-daemon.service": "enabled",
 }
-OBSOLETE_SERVICES = ["hidamari-rotate.service", "hidamari-rotate.timer"]
+OBSOLETE_SERVICES = ["hidamari-rotate.service", "hidamari-rotate.timer", "hidamari-sync.service"]
 REQUIRED_BINARIES = [
     "hidamari-daemon", "hidamari-gui", "hidamari_core.py",
-    "wallpaper_engine_launcher.py", "hidamari-sync", "hidamari-rotate",
+    "wallpaper_engine_launcher.py", "ripowall-renderer",
 ]
 
 DIAG_OUTPUT_DIR = Path.home() / ".cache" / "ripowall" / "diagnostics"
@@ -396,94 +395,63 @@ def check_pre_deploy_syntax(report: DiagnosticReport) -> None:
             "Todos los scripts compilan."))
 
 
-# ── Checks: HIDAMARI ──────────────────────────────────────────────────────
+# ── Checks: REPRODUCTOR (ripowall-renderer + extensión de GNOME) ─────────
 
-def check_hidamari_player(report: DiagnosticReport) -> None:
-    pids = _pgrep("hidamari-server")
-    if not pids:
-        report.results.append(CheckResult("HIDAMARI", "Hidamari player", "error",
-            "hidamari-server no esta corriendo.", "Lanza Hidamari: hidamari &"))
-        return
-    player_pids = _pgrep("hidamari-player")
-    report.results.append(CheckResult("HIDAMARI", "Hidamari player", "ok",
-        f"Hidamari corriendo: server PID {pids[0]}, {len(player_pids)} player(s)."))
+EXTENSION_UUID = "ripowall@ripotech.cl"
 
 
-def check_hidamari_dbus(report: DiagnosticReport) -> None:
-    ping = _run(["gdbus", "call", "--session",
-        "--dest", "io.github.jeffshee.Hidamari.server",
-        "--object-path", "/io/github/jeffshee/Hidamari/server",
-        "--method", "org.freedesktop.DBus.Peer.Ping"])
-    if ping.returncode != 0:
-        report.results.append(CheckResult("HIDAMARI", "DBus connectivity", "error",
-            "No se puede contactar al server DBus de Hidamari.",
-            "Reinicia Hidamari: pkill hidamari-server && hidamari &",
-            detail=ping.stderr.strip()))
-        return
-    intro = _run(["gdbus", "introspect", "--session",
-        "--dest", "io.github.jeffshee.Hidamari.server",
-        "--object-path", "/io/github/jeffshee/Hidamari/server",
-        "--recurse", "--xml"])
-    has_reload = 'name="reload"' in intro.stdout
-    has_video = 'name="video"' in intro.stdout
-    if has_reload and has_video:
-        report.results.append(CheckResult("HIDAMARI", "DBus connectivity", "ok",
-            "DBus OK: reload() y video() expuestos."))
+def check_renderer(report: DiagnosticReport) -> None:
+    r = _run(["gdbus", "call", "--session", "--dest", "org.freedesktop.DBus",
+              "--object-path", "/org/freedesktop/DBus",
+              "--method", "org.freedesktop.DBus.NameHasOwner", "cl.ripotech.RipoWall.Renderer"])
+    if r.returncode == 0 and "true" in r.stdout:
+        report.results.append(CheckResult("REPRODUCTOR", "Reproductor", "ok",
+            "ripowall-renderer corriendo y responde por D-Bus."))
     else:
-        missing = [m for m, h in [("reload", has_reload), ("video", has_video)] if not h]
-        report.results.append(CheckResult("HIDAMARI", "DBus connectivity", "error",
-            f"Metodos faltantes: {', '.join(missing)}.",
-            "Actualiza Hidamari a la version mas reciente (AUR)."))
+        report.results.append(CheckResult("REPRODUCTOR", "Reproductor", "error",
+            "ripowall-renderer no está corriendo (lo lanza la extensión de GNOME).",
+            f"gnome-extensions enable {EXTENSION_UUID}; si es recién instalada, cerrar sesión y volver a entrar.",
+            detail=(r.stderr or r.stdout).strip()))
 
 
-def check_reload_config_bug(report: DiagnosticReport) -> None:
-    """BUG CRITICO: reload_config() llama a DBUS_PLAYER en vez de DBUS_SERVER."""
-    cp = LOCAL_BIN / "hidamari_core.py"
-    if not cp.exists():
+def check_extension(report: DiagnosticReport) -> None:
+    r = _run(["gnome-extensions", "info", EXTENSION_UUID])
+    estado = re.search(r"(?:State|Estado):\s*(\S+)", r.stdout)
+    estado = estado.group(1).upper() if estado else ""
+    if r.returncode != 0:
+        report.results.append(CheckResult("REPRODUCTOR", "Extensión de GNOME", "error",
+            f"La extensión {EXTENSION_UUID} no está instalada.",
+            "Instalar RipoWall de nuevo (install.sh copia la extensión).", detail=r.stderr.strip()))
+    elif estado in ("ACTIVE", "ENABLED", "ACTIVA", "HABILITADA"):
+        report.results.append(CheckResult("REPRODUCTOR", "Extensión de GNOME", "ok", f"Extensión {estado.lower()}."))
+    else:
+        report.results.append(CheckResult("REPRODUCTOR", "Extensión de GNOME", "error",
+            f"Extensión en estado {estado or 'desconocido'}.",
+            f"gnome-extensions enable {EXTENSION_UUID} (si es recién instalada: cerrar sesión y volver a entrar)."))
+
+
+def check_ripowall_config(report: DiagnosticReport) -> None:
+    if not RIPOWALL_CONFIG.exists():
+        report.results.append(CheckResult("REPRODUCTOR", "config.json", "warning",
+            "config.json de RipoWall todavía no existe.", "Se crea solo al abrir la GUI o arrancar el daemon.",
+            f"Ruta: {RIPOWALL_CONFIG}"))
         return
     try:
-        content = cp.read_text(encoding="utf-8")
-    except OSError:
-        return
-    # Detectar el patron de la funcion reload_config
-    m = re.search(r'def reload_config\(\)[^:]*:(.*?)(?=\n(?:def |class |# ──))', content, re.DOTALL)
-    if m:
-        block = m.group(1)
-        uses_player = "DBUS_PLAYER_BUS" in block and "DBUS_PLAYER_PATH" in block
-        if uses_player:
-            report.results.append(CheckResult("HIDAMARI", "reload_config DBus bug", "error",
-                "BUG CRITICO: reload_config() llama a DBUS_PLAYER_BUS (INCORRECTO). "
-                "El player NO tiene interfaz custom — reload_config jamas se aplica. "
-                "Los cambios de wallpaper del daemon FALLAN SILENCIOSAMENTE.",
-                "Cambia DBUS_PLAYER_BUS -> DBUS_SERVER_BUS y el metodo a server.reload. "
-                "El server SI expone reload() en /io/github/jeffshee/Hidamari/server."))
-        else:
-            report.results.append(CheckResult("HIDAMARI", "reload_config DBus bug", "ok",
-                "reload_config() usa el bus correcto (SERVER)."))
-
-
-def check_hidamari_config(report: DiagnosticReport) -> None:
-    if not HIDAMARI_CONFIG.exists():
-        report.results.append(CheckResult("HIDAMARI", "config.json", "error",
-            "config.json no encontrado.", "Lanza Hidamari para generar la config inicial.",
-            f"Ruta: {HIDAMARI_CONFIG}"))
-        return
-    try:
-        data = json.loads(HIDAMARI_CONFIG.read_text(encoding="utf-8"))
+        data = json.loads(RIPOWALL_CONFIG.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
-        report.results.append(CheckResult("HIDAMARI", "config.json", "error",
+        report.results.append(CheckResult("REPRODUCTOR", "config.json", "error",
             f"JSON invalido: {e}", "Restaura desde backup."))
         return
     ds = data.get("data_source", {})
     connected = _connected_monitors()
     orphans = set(ds.keys()) - connected - {"Default"}
-    msgs = [f"mode={data.get('mode', '?')}", f"{len(ds)} fuentes"]
+    msgs = [f"{len(ds)} fuentes"]
     st, fix = "ok", ""
     if orphans:
         st = "warning"
-        fix = f"Elimina {', '.join(sorted(orphans))} de data_source. Pueden reaparecer por bug de Hidamari."
+        fix = f"El daemon los quita solo al detectar monitores: {', '.join(sorted(orphans))}."
         msgs.append(f"Huerfanos: {', '.join(sorted(orphans))}")
-    report.results.append(CheckResult("HIDAMARI", "config.json", st, ", ".join(msgs),
+    report.results.append(CheckResult("REPRODUCTOR", "config.json", st, ", ".join(msgs),
         fix_suggestion=fix, detail=f"Monitores: {', '.join(sorted(connected))}" if connected else ""))
 
 
@@ -504,29 +472,6 @@ def check_workshop_content(report: DiagnosticReport) -> None:
     else:
         report.results.append(CheckResult("WORKSHOP", "Workshop content", "ok",
             f"{count} wallpapers disponibles."))
-
-
-def check_flat_symlinks(report: DiagnosticReport) -> None:
-    if not HIDAMARI_FLAT.exists():
-        report.results.append(CheckResult("WORKSHOP", "Flat symlinks", "error",
-            "~/Videos/Hidamari/ no existe.", "mkdir -p ~/Videos/Hidamari && ejecuta hidamari-sync"))
-        return
-    try:
-        entries = list(HIDAMARI_FLAT.iterdir())
-        symlinks = [e for e in entries if e.is_symlink()]
-        broken = [e for e in symlinks if not e.exists()]
-    except OSError:
-        report.results.append(CheckResult("WORKSHOP", "Flat symlinks", "error",
-            "No se puede acceder al directorio."))
-        return
-    msgs = [f"{len(symlinks)} symlinks"]
-    st, fix = "ok", ""
-    if broken:
-        msgs.append(f"{len(broken)} rotos")
-        st = "warning"
-        fix = "Ejecuta hidamari-sync para regenerar symlinks rotos."
-    report.results.append(CheckResult("WORKSHOP", "Flat symlinks", st, ", ".join(msgs), fix_suggestion=fix,
-        detail=f"Directorio: {HIDAMARI_FLAT}"))
 
 
 # ── Reparacion automatica ──────────────────────────────────────────────────
@@ -573,9 +518,8 @@ ALL_CHECKS = [
     check_we_processes, check_cef_networking,
     check_ripowall_binaries, check_ripowall_systemd, check_obsolete_services,
     check_daemon_health, check_pre_deploy_syntax,
-    check_hidamari_player, check_hidamari_dbus, check_reload_config_bug,
-    check_hidamari_config,
-    check_workshop_content, check_flat_symlinks,
+    check_renderer, check_extension, check_ripowall_config,
+    check_workshop_content,
 ]
 
 

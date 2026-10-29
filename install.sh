@@ -14,7 +14,9 @@ BIN_DIR="${HOME}/.local/bin"
 APPS_DIR="${HOME}/.local/share/applications"
 ICONS_DIR="${HOME}/.local/share/icons"
 SYSTEMD_USER="${HOME}/.config/systemd/user"
-CONFIG_DIR="${HOME}/.config/hidamari"
+CONFIG_DIR="${HOME}/.config/ripowall"
+EXT_UUID="ripowall@ripotech.cl"
+EXT_DIR="${HOME}/.local/share/gnome-shell/extensions/${EXT_UUID}"
 
 RIPOWALL_VERSION="3.2.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -133,6 +135,22 @@ install_ripowall() {
         fi
     done
 
+    # Reproductor propio (lo lanza la extensión de GNOME)
+    cp "${SCRIPT_DIR}/ripowall_renderer.py" "$BIN_DIR/ripowall-renderer"
+    chmod +x "$BIN_DIR/ripowall-renderer"
+    echo -e "  ${GREEN}✓${RESET} ripowall-renderer → $BIN_DIR/"
+
+    # Extensión de GNOME Shell (pone el reproductor como fondo de cada monitor)
+    mkdir -p "$EXT_DIR"
+    cp "${SCRIPT_DIR}/extension/${EXT_UUID}/"* "$EXT_DIR/"
+    echo -e "  ${GREEN}✓${RESET} extensión ${EXT_UUID} → $EXT_DIR/"
+    if gnome-extensions enable "$EXT_UUID"; then
+        echo -e "  ${GREEN}✓${RESET} extensión activada (si es la primera vez: cerrar sesión y volver a entrar)"
+    else
+        echo -e "  ${YELLOW}!${RESET} no se pudo activar la extensión ahora: cerrar sesión, volver a entrar y correr:"
+        echo -e "      gnome-extensions enable ${EXT_UUID}"
+    fi
+
     # Symlink ripowall CLI
     if [ -f "${SCRIPT_DIR}/wallpaper_engine_launcher.py" ]; then
         ln -sf "$BIN_DIR/wallpaper_engine_launcher.py" "$BIN_DIR/ripowall-we"
@@ -147,16 +165,15 @@ install_ripowall() {
   "data_source": {},
   "mode": "MODE_VIDEO",
   "is_mute": true,
-  "audio_volume": 0,
-  "is_static_wallpaper": true,
-  "fade_interval": 600
+  "audio_volume": 50,
+  "is_pause_when_maximized": true
 }
 EOF
         echo -e "  ${GREEN}✓${RESET} Config default creada"
     fi
 
     # Systemd user services
-    for f in hidamari-daemon.service hidamari-rotate.service hidamari-rotate.timer; do
+    for f in hidamari-daemon.service; do
         if [ -f "${SCRIPT_DIR}/${f}" ]; then
             cp "${SCRIPT_DIR}/${f}" "$SYSTEMD_USER/"
             echo -e "  ${GREEN}✓${RESET} $f → $SYSTEMD_USER/"
@@ -186,9 +203,7 @@ enable_daemon() {
 
     systemctl --user daemon-reload 2>/dev/null || true
     systemctl --user enable hidamari-daemon.service 2>/dev/null || true
-    systemctl --user enable hidamari-rotate.timer 2>/dev/null || true
     systemctl --user start hidamari-daemon.service 2>/dev/null || true
-    systemctl --user start hidamari-rotate.timer 2>/dev/null || true
 
     echo -e "  ${GREEN}✓${RESET} Daemon habilitado (systemd user)"
 }

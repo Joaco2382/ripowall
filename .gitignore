@@ -5,3 +5,8 @@ __pycache__/
 *cache*
 /log.txt
 /wallpaperuilog.txt
+
+# Herramientas de los agentes (locales, no van al repo)
+.claude/worktrees/
+.serena/
+.gitnexus/

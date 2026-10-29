@@ -13,39 +13,82 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import hidamari_core as H  # noqa: E402
 
-# Salida real de `gdbus call ... Properties.GetAll` con Hidamari corriendo (2026-10-29)
-GDBUS_GETALL = (
-    "({'mode': <'MODE_VIDEO'>, 'volume': <0>, 'blur_radius': <5>, "
-    "'is_mute': <true>, 'is_playing': <true>, 'is_paused_by_user': <false>, "
-    "'is_static_wallpaper': <true>, 'is_pause_when_maximized': <false>, "
-    "'is_mute_when_maximized': <false>},)\n"
+try:
+    import ripowall_renderer as R
+except (ImportError, ValueError) as e:  # sin GTK4 instalado
+    R, RENDERER_ERROR = None, e
+
+# Salida real de `gdbus call ... org.gtk.Actions.DescribeAll` del reproductor propio (2026-10-29)
+DESCRIBE_ALL = (
+    "({'silencio': (true, signature '', [<true>]), 'volumen': (true, '', [<100>]), "
+    "'pausado': (true, '', [<true>]), 'recargar': (true, '', []), 'cubierto': (true, '(iib)', [])},)\n"
 )
 
 
 class TestServerProperties(unittest.TestCase):
     def _run_with(self, stdout):
         done = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
-        with mock.patch.object(H.subprocess, "run", return_value=done):
-            return H.get_server_properties()
+        with mock.patch.object(H.subprocess, "run", return_value=done) as run:
+            return H.get_server_properties(), run
 
-    def test_lee_booleanos_enteros_y_textos(self):
-        props = self._run_with(GDBUS_GETALL)
+    def test_lee_el_estado_del_reproductor_con_las_claves_de_siempre(self):
+        props, run = self._run_with(DESCRIBE_ALL)
         self.assertIs(props["is_mute"], True)
-        self.assertIs(props["is_paused_by_user"], False)
-        self.assertIs(props["is_pause_when_maximized"], False)
-        self.assertEqual(props["volume"], 0)
-        self.assertEqual(props["blur_radius"], 5)
-        self.assertEqual(props["mode"], "MODE_VIDEO")
+        self.assertIs(props["is_paused_by_user"], True)
+        self.assertIs(props["is_playing"], False)
+        self.assertEqual(props["volume"], 100)
+        self.assertIn("org.gtk.Actions.DescribeAll", run.call_args.args[0])
+        self.assertIn("cl.ripotech.RipoWall.Renderer", run.call_args.args[0])
 
     def test_enteros_con_tipo_explicito(self):
-        props = self._run_with("({'volume': <int32 42>, 'is_mute': <false>},)")
+        props, _ = self._run_with("({'volumen': (true, '', [<int32 42>]), 'pausado': (true, '', [<false>])},)")
         self.assertEqual(props["volume"], 42)
-        self.assertIs(props["is_mute"], False)
+        self.assertIs(props["is_playing"], True)
 
-    def test_error_de_dbus_devuelve_vacio(self):
+    def test_reproductor_apagado_devuelve_vacio(self):
         err = subprocess.CalledProcessError(1, ["gdbus"])
         with mock.patch.object(H.subprocess, "run", side_effect=err):
             self.assertEqual(H.get_server_properties(), {})
+
+
+class TestControlDelReproductor(unittest.TestCase):
+    """Los comandos exactos que el core le manda al reproductor por D-Bus."""
+
+    def _llamar(self, fn, *args):
+        done = subprocess.CompletedProcess(args=[], returncode=0, stdout="()", stderr="")
+        with mock.patch.object(H.subprocess, "run", return_value=done) as run:
+            ok = fn(*args)
+        return ok, [c.args[0] for c in run.call_args_list]
+
+    def test_pausar_y_reanudar(self):
+        ok, cmds = self._llamar(H.pause_playback)
+        self.assertTrue(ok)
+        self.assertIn("org.gtk.Actions.SetState", cmds[0])
+        self.assertEqual(cmds[0][-3:], ["pausado", "<true>", "{}"])
+        _, cmds = self._llamar(H.start_playback)
+        self.assertEqual(cmds[0][-3:], ["pausado", "<false>", "{}"])
+
+    def test_silencio_y_volumen_limitado(self):
+        _, cmds = self._llamar(H.set_mute, True)
+        self.assertEqual(cmds[0][-3:], ["silencio", "<true>", "{}"])
+        _, cmds = self._llamar(H.set_volume, 250)
+        self.assertEqual(cmds[0][-3:], ["volumen", "<int32 100>", "{}"])
+        _, cmds = self._llamar(H.set_volume, -3)
+        self.assertEqual(cmds[0][-3:], ["volumen", "<int32 0>", "{}"])
+
+    def test_recargar(self):
+        ok, cmds = self._llamar(H.reload_config)
+        self.assertTrue(ok)
+        self.assertIn("org.gtk.Actions.Activate", cmds[0])
+        self.assertEqual(cmds[0][-3:], ["recargar", "[]", "{}"])
+
+    def test_reproductor_corriendo(self):
+        si = subprocess.CompletedProcess(args=[], returncode=0, stdout="(true,)\n", stderr="")
+        no = subprocess.CompletedProcess(args=[], returncode=0, stdout="(false,)\n", stderr="")
+        with mock.patch.object(H.subprocess, "run", return_value=si):
+            self.assertTrue(H.is_server_running())
+        with mock.patch.object(H.subprocess, "run", return_value=no):
+            self.assertFalse(H.is_server_running())
 
 
 class TestSanitizeHidamariConfig(unittest.TestCase):
@@ -98,6 +141,64 @@ class TestRotateSettings(unittest.TestCase):
         with open(self.path, "w", encoding="utf-8") as f:
             f.write("{no es json")
         self.assertEqual(H.get_rotate_minutes(), H.DEFAULT_ROTATE_MINUTES)
+
+
+class TestConfigPropia(unittest.TestCase):
+    """config.json de RipoWall: migración desde Hidamari y escritura aunque el reproductor no corra."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.propia = os.path.join(self.tmp.name, "ripowall", "config.json")
+        self.vieja = os.path.join(self.tmp.name, "hidamari", "config.json")
+        for p in (mock.patch.object(H, "CONFIG_PATH", self.propia),
+                  mock.patch.object(H, "CONFIG_HIDAMARI", self.vieja)):
+            p.start()
+            self.addCleanup(p.stop)
+        # el reproductor «apagado»: toda llamada por D-Bus falla
+        p = mock.patch.object(H.subprocess, "run", side_effect=subprocess.CalledProcessError(1, ["gdbus"]))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_migra_la_config_de_hidamari_una_vez(self):
+        os.makedirs(os.path.dirname(self.vieja))
+        with open(self.vieja, "w", encoding="utf-8") as f:
+            json.dump({"data_source": {"eDP-1": "/wp/a.mp4"}, "is_mute": True}, f)
+        self.assertEqual(H.load_config()["data_source"], {"eDP-1": "/wp/a.mp4"})
+        self.assertTrue(os.path.isfile(self.propia))
+        with open(self.vieja, "w", encoding="utf-8") as f:   # cambios posteriores en la vieja no se copian
+            json.dump({"data_source": {"eDP-1": "/wp/OTRO.mp4"}}, f)
+        self.assertEqual(H.load_config()["data_source"], {"eDP-1": "/wp/a.mp4"})
+
+    def test_sin_ninguna_config_devuelve_vacio(self):
+        self.assertEqual(H.load_config(), {})
+
+    def test_asignar_se_guarda_aunque_el_reproductor_no_corra(self):
+        self.assertTrue(H.assign_video_to_monitor("/wp/b.mp4", "HDMI-1"))
+        cfg = H.load_config()
+        self.assertEqual(cfg["data_source"]["HDMI-1"], "/wp/b.mp4")
+        self.assertEqual(cfg["mode"], "MODE_VIDEO")
+
+    def test_pausa_con_maximizada_se_guarda_en_la_config(self):
+        H.save_config({"is_pause_when_maximized": True})
+        H.set_pause_when_maximized(False)
+        self.assertIs(H.load_config()["is_pause_when_maximized"], False)
+
+
+@unittest.skipIf(R is None and not os.environ.get("RIPOWALL_REQUIERE_GUI"), "GTK4 no disponible")
+class TestReglaDeReproduccion(unittest.TestCase):
+    def test_tabla(self):
+        if R is None:
+            raise RENDERER_ERROR
+        casos = [  # (pausado, pausa_si_maximizada, cubierto) -> reproduce
+            ((False, True, False), True),
+            ((False, True, True), False),    # tapado y con la opción activa: pausa
+            ((False, False, True), True),    # tapado pero la opción está apagada: sigue
+            ((True, False, False), False),   # pausa del usuario manda
+            ((True, True, True), False),
+        ]
+        for args, esperado in casos:
+            self.assertIs(R.debe_reproducir(*args), esperado, args)
 
 
 if __name__ == "__main__":

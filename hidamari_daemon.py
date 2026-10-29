@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Hidamari Daemon — Wallpapers inteligentes multi-monitor.
+Daemon de RipoWall — fondos inteligentes multi-monitor (asigna, rota, vigila el Workshop y los monitores).
 Usa hidamari_core para toda la lógica compartida.
 
 Servicio systemd:
@@ -209,7 +209,7 @@ def main():
     rebuild_flat_folder()  # limpia symlinks rotos de wallpapers borrados
     clean_monitors(config)
     if sanitize_hidamari_config(config):
-        log("config.json de Hidamari reparada (fade_interval/audio_volume)")
+        log("config.json reparada (fade_interval/audio_volume)")
         save_config(config)
 
     missing = missing_monitors(config, wallpapers)

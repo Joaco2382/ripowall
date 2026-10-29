@@ -131,8 +131,6 @@ Steam Workshop (WebView o app WE) → MP4 en workshop/content/431960/
 | Servicio | Proposito | Activacion |
 |----------|----------|-----------|
 | `hidamari-daemon.service` | Daemon principal: rotacion, hotplug, watcher | `graphical-session.target` |
-| `hidamari-rotate.service` | One-shot: ejecuta `hidamari-daemon --once` | Activado por timer |
-| `hidamari-rotate.timer` | Timer cada 10 min | `timers.target` |
 
 ## Comandos
 

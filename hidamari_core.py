@@ -69,17 +69,15 @@ def _find_steam_workshop() -> str:
 # ── Constantes ──────────────────────────────────────────────────────────────
 
 WORKSHOP = _find_steam_workshop()
-CONFIG_PATH = os.path.join(Path.home(), ".config/hidamari/config.json")
+CONFIG_PATH = os.path.join(Path.home(), ".config/ripowall/config.json")
+# Config de Hidamari: se copia una vez a CONFIG_PATH (mismos campos) al pasar al reproductor propio
+CONFIG_HIDAMARI = os.path.join(Path.home(), ".config/hidamari/config.json")
 FLAT_DIR = os.path.join(_xdg_user_dir("VIDEOS"), "Hidamari")
 THUMB_CACHE = os.path.join(Path.home(), ".cache/hidamari-gui/thumbnails")
 
-DBUS_SERVER_BUS = "io.github.jeffshee.Hidamari.server"
-DBUS_SERVER_PATH = "/io/github/jeffshee/Hidamari/server"
-DBUS_SERVER_IFACE = "io.github.jeffshee.hidamari.server"
-
-DBUS_PLAYER_BUS = "io.github.jeffshee.Hidamari.player"
-DBUS_PLAYER_PATH = "/io/github/jeffshee/Hidamari/player"
-DBUS_PLAYER_IFACE = "io.github.jeffshee.hidamari.player"
+# Reproductor propio (ripowall-renderer): acciones de GApplication por D-Bus (org.gtk.Actions)
+RENDERER_BUS = "cl.ripotech.RipoWall.Renderer"
+RENDERER_PATH = "/cl/ripotech/RipoWall/Renderer"
 
 
 # ── Dataclasses ─────────────────────────────────────────────────────────────
@@ -247,7 +245,14 @@ def get_display_layout() -> tuple:
 # ── Config ──────────────────────────────────────────────────────────────────
 
 def load_config() -> dict:
-    """Carga config.json con manejo de errores."""
+    """Carga config.json con manejo de errores (la primera vez la copia desde la de Hidamari)."""
+    if not os.path.exists(CONFIG_PATH) and os.path.exists(CONFIG_HIDAMARI):
+        try:
+            os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+            shutil.copyfile(CONFIG_HIDAMARI, CONFIG_PATH)
+            print(f"[core] Config migrada de {CONFIG_HIDAMARI} a {CONFIG_PATH}", flush=True)
+        except OSError as e:
+            print(f"[core] No se pudo migrar la config de Hidamari: {e}", flush=True)
     try:
         with open(CONFIG_PATH, encoding='utf-8') as f:
             return json.load(f)
@@ -260,8 +265,9 @@ def load_config() -> dict:
 
 
 def save_config(config: dict) -> bool:
-    """Guarda config.json de forma atómica (write-temp + rename)."""
+    """Guarda config.json de forma atómica (write-temp + rename). El reproductor la recarga solo."""
     try:
+        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
         tmp = CONFIG_PATH + ".tmp"
         with open(tmp, 'w', encoding='utf-8') as f:
             json.dump(config, f, indent=2, ensure_ascii=False)
@@ -342,193 +348,123 @@ def get_current_wallpapers() -> dict[str, str]:
 
 # ── DBus Client (Hidamari Server) ──────────────────────────────────────────
 
-def _dbus_call(dest: str, path: str, iface: str, method: str) -> bool:
-    """Llama a un metodo DBus. Retorna True si OK, False si error."""
-    try:
-        subprocess.run(
-            ["gdbus", "call", "--session", "--dest", dest,
-             "--object-path", path, "--method", f"{iface}.{method}"],
-            capture_output=True, timeout=5, check=True
-        )
-        return True
-    except Exception:
-        return False
-
-
 def is_server_running() -> bool:
-    """Verifica si el servidor de Hidamari está corriendo."""
+    """¿Está corriendo el reproductor? (lo lanza la extensión de GNOME; no se arranca desde aquí)"""
     try:
-        subprocess.run(
-            ["gdbus", "call", "--session", "--dest", DBUS_SERVER_BUS,
-             "--object-path", DBUS_SERVER_PATH,
-             "--method", "org.freedesktop.DBus.Peer.Ping"],
-            capture_output=True, timeout=3, check=True
+        r = subprocess.run(
+            ["gdbus", "call", "--session", "--dest", "org.freedesktop.DBus",
+             "--object-path", "/org/freedesktop/DBus",
+             "--method", "org.freedesktop.DBus.NameHasOwner", RENDERER_BUS],
+            capture_output=True, text=True, timeout=3, check=True
         )
-        return True
-    except Exception:
+        return "true" in r.stdout
+    except Exception as e:
+        print(f"[core] No se pudo consultar el reproductor: {e}", flush=True)
         return False
 
 
 def assign_video_to_monitor(video_path: str, monitor: str) -> bool:
-    """Asigna un video a un monitor vía DBus (sin tocar config.json).
-    Usa el método video() del servidor de Hidamari.
+    """Asigna un video a un monitor: lo guarda en config.json y el reproductor lo aplica.
 
-    monitor: nombre del conector ('eDP-1', 'HDMI-1') o 'Default'.
+    monitor: nombre del conector ('eDP-1', 'HDMI-1') o 'Default'. Si el reproductor no está
+    corriendo, la asignación queda guardada y se aplica cuando arranque.
     """
-    # Método 1: Intentar vía server.video() (más limpio)
-    try:
-        subprocess.run(
-            ["gdbus", "call", "--session", "--dest", DBUS_SERVER_BUS,
-             "--object-path", DBUS_SERVER_PATH,
-             "--method", f"{DBUS_SERVER_IFACE}.video",
-             video_path, monitor],
-            capture_output=True, timeout=5, check=True
-        )
-        # Guardar config.json para persistencia tras reinicio
-        config = load_config()
-        if config:
-            config.setdefault("data_source", {})[monitor] = video_path
-            config["mode"] = "MODE_VIDEO"
-            save_config(config)
-        return True
-    except Exception:
-        pass
-
-    # Método 2: Fallback — editar config.json + reload_config
-    try:
-        config = load_config()
-        if not config:
-            return False
-        config.setdefault("data_source", {})[monitor] = video_path
-        config["mode"] = "MODE_VIDEO"
-        save_config(config)
-
-        subprocess.run(
-            ["gdbus", "call", "--session", "--dest", DBUS_SERVER_BUS,
-             "--object-path", DBUS_SERVER_PATH,
-             "--method", f"{DBUS_SERVER_IFACE}.reload"],
-            capture_output=True, timeout=5, check=True
-        )
-        return True
-    except Exception:
+    config = load_config()
+    config.setdefault("data_source", {})[monitor] = video_path
+    config["mode"] = "MODE_VIDEO"
+    if not save_config(config):
         return False
+    reload_config()  # el reproductor también vigila el archivo; esto lo hace inmediato
+    return True
 
 
 def pause_playback() -> bool:
-    """Pausa la reproducción."""
-    try:
-        subprocess.run(
-            ["gdbus", "call", "--session", "--dest", DBUS_SERVER_BUS,
-             "--object-path", DBUS_SERVER_PATH,
-             "--method", f"{DBUS_SERVER_IFACE}.pause_playback"],
-            capture_output=True, timeout=3, check=True
-        )
-        return True
-    except Exception:
-        return False
+    """Pausa la reproducción (pausa del usuario)."""
+    return _estado_renderer("pausado", "<true>")
 
 
 def start_playback() -> bool:
     """Reanuda la reproducción."""
-    try:
-        subprocess.run(
-            ["gdbus", "call", "--session", "--dest", DBUS_SERVER_BUS,
-             "--object-path", DBUS_SERVER_PATH,
-             "--method", f"{DBUS_SERVER_IFACE}.start_playback"],
-            capture_output=True, timeout=3, check=True
-        )
-        return True
-    except Exception:
-        return False
+    return _estado_renderer("pausado", "<false>")
 
 
-def _set_server_bool(prop: str, value: bool) -> bool:
-    val = "<true>" if value else "<false>"
+def _renderer(metodo: str, *args: str) -> str | None:
+    """Llama a org.gtk.Actions.<metodo> del reproductor. Devuelve la salida de gdbus o None si falló."""
     try:
-        subprocess.run(
-            ["gdbus", "call", "--session", "--dest", DBUS_SERVER_BUS,
-             "--object-path", DBUS_SERVER_PATH,
-             "--method", "org.freedesktop.DBus.Properties.Set",
-             DBUS_SERVER_IFACE, prop, val],
-            capture_output=True, timeout=3, check=True
+        r = subprocess.run(
+            ["gdbus", "call", "--session", "--dest", RENDERER_BUS,
+             "--object-path", RENDERER_PATH,
+             "--method", f"org.gtk.Actions.{metodo}", *args],
+            capture_output=True, text=True, timeout=3, check=True
         )
-        return True
+        return r.stdout
     except Exception as e:
-        print(f"[core] Error cambiando {prop}: {e}", flush=True)
-        return False
+        print(f"[core] Reproductor: {metodo} {' '.join(args)} falló: {e}", flush=True)
+        return None
+
+
+def _accion_renderer(nombre: str) -> bool:
+    return _renderer("Activate", nombre, "[]", "{}") is not None
+
+
+def _estado_renderer(nombre: str, valor: str) -> bool:
+    """valor en texto GVariant: '<true>', '<int32 50>'."""
+    return _renderer("SetState", nombre, valor, "{}") is not None
 
 
 def set_mute(muted: bool) -> bool:
     """Mutea/desmutea el audio."""
-    return _set_server_bool("is_mute", muted)
+    return _estado_renderer("silencio", "<true>" if muted else "<false>")
 
 
 def set_pause_when_maximized(enabled: bool) -> bool:
-    """Pausar el video cuando hay una ventana maximizada o en pantalla completa."""
-    return _set_server_bool("is_pause_when_maximized", enabled)
+    """Pausar el video cuando hay una ventana maximizada o en pantalla completa.
+
+    El ajuste vive en config.json (is_pause_when_maximized): se guarda y el reproductor lo relee.
+    Qué ventanas tapan cada monitor lo detecta la extensión de GNOME.
+    """
+    config = load_config()
+    config["is_pause_when_maximized"] = bool(enabled)
+    return save_config(config) and reload_config()
 
 
 def set_volume(vol: int) -> bool:
     """Ajusta volumen (0-100)."""
-    try:
-        subprocess.run(
-            ["gdbus", "call", "--session", "--dest", DBUS_SERVER_BUS,
-             "--object-path", DBUS_SERVER_PATH,
-             "--method", "org.freedesktop.DBus.Properties.Set",
-             DBUS_SERVER_IFACE, "volume", f"<int32 {vol}>"],
-            capture_output=True, timeout=3, check=True
-        )
-        return True
-    except Exception:
-        return False
+    return _estado_renderer("volumen", f"<int32 {max(0, min(int(vol), 100))}>")
 
 
-def _parse_gdbus_props(text: str) -> dict:
-    """Parsea la salida de gdbus GetAll: ({'is_mute': <true>, 'volume': <0>, 'mode': <'MODE_VIDEO'>},)"""
+def _parse_estados_acciones(text: str) -> dict:
+    """Parsea org.gtk.Actions.DescribeAll del reproductor y lo devuelve con las claves de siempre.
+
+    Salida de gdbus: ({'pausado': (true, '', [<false>]), 'volumen': (true, '', [<50>]), ...},)
+    (acción: (habilitada, tipo de parámetro, [estado])). Las acciones sin estado no aparecen.
+    """
+    estados = {}
+    for nombre, valor in re.findall(r"'(\w+)':\s*\((?:true|false),\s*(?:signature\s+)?'[^']*',\s*\[<([^>]*)>\]\)", text):
+        if valor in ("true", "false"):
+            estados[nombre] = valor == "true"
+        elif re.fullmatch(r"(?:int32\s+)?-?\d+", valor):
+            estados[nombre] = int(valor.split()[-1])
     props = {}
-    for key, val in re.findall(r"'(\w+)':\s*<([^>]*)>", text):
-        if val in ("true", "false"):
-            props[key] = val == "true"
-        elif re.fullmatch(r"(?:int32\s+)?-?\d+", val):
-            props[key] = int(val.split()[-1])
-        else:
-            props[key] = val.strip("'")
+    if "pausado" in estados:
+        props["is_paused_by_user"] = estados["pausado"]
+        props["is_playing"] = not estados["pausado"]
+    if "silencio" in estados:
+        props["is_mute"] = estados["silencio"]
+    if "volumen" in estados:
+        props["volume"] = estados["volumen"]
     return props
 
 
 def get_server_properties() -> dict:
-    """Obtiene todas las propiedades del servidor Hidamari."""
-    try:
-        r = subprocess.run(
-            ["gdbus", "call", "--session", "--dest", DBUS_SERVER_BUS,
-             "--object-path", DBUS_SERVER_PATH,
-             "--method", "org.freedesktop.DBus.Properties.GetAll",
-             DBUS_SERVER_IFACE],
-            capture_output=True, text=True, timeout=3, check=True
-        )
-        return _parse_gdbus_props(r.stdout)
-    except Exception as e:
-        print(f"[core] Error leyendo propiedades de Hidamari: {e}", flush=True)
-        return {}
+    """Estado en vivo del reproductor: is_paused_by_user, is_playing, is_mute, volume ({} si no corre)."""
+    salida = _renderer("DescribeAll")
+    return _parse_estados_acciones(salida) if salida else {}
 
 
 def reload_config() -> bool:
-    """Recarga config.json en Hidamari via DBus server.
-
-    IMPORTANTE: El server SI expone reload() en la interfaz hidamari.server.
-    El player NO tiene interfaz custom — llamar a player.reload_config
-    siempre fallaba silenciosamente (ServiceUnknown).
-    """
-    try:
-        subprocess.run(
-            ["gdbus", "call", "--session", "--dest", DBUS_SERVER_BUS,
-             "--object-path", DBUS_SERVER_PATH,
-             "--method", f"{DBUS_SERVER_IFACE}.reload"],
-            capture_output=True, timeout=5, check=True
-        )
-        return True
-    except Exception:
-        return False
+    """Pide al reproductor releer config.json (además la vigila: esto solo lo hace inmediato)."""
+    return _accion_renderer("recargar")
 
 
 # ── Rotación ────────────────────────────────────────────────────────────────

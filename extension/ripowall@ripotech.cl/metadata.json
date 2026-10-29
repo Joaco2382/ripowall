@@ -1,0 +1,9 @@
+{
+  "uuid": "ripowall@ripotech.cl",
+  "name": "RipoWall",
+  "description": "Fondos animados de Wallpaper Engine en GNOME: pone las ventanas del reproductor de RipoWall como fondo de cada monitor.",
+  "shell-version": ["51"],
+  "session-modes": ["user"],
+  "url": "https://github.com/Joaco2382/ripowall",
+  "version": 1
+}

@@ -47,8 +47,6 @@ package() {
 
     # Systemd user services
     install -Dm644 hidamari-daemon.service   "${pkgdir}/usr/lib/systemd/user/hidamari-daemon.service"
-    install -Dm644 hidamari-rotate.service   "${pkgdir}/usr/lib/systemd/user/hidamari-rotate.service"
-    install -Dm644 hidamari-rotate.timer     "${pkgdir}/usr/lib/systemd/user/hidamari-rotate.timer"
 
     # Desktop entry
     install -Dm644 ripowall.desktop         "${pkgdir}/usr/share/applications/ripowall.desktop"
