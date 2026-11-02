@@ -39,7 +39,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends \
-            python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 gir1.2-webkit-6.0
+            python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 gir1.2-webkit-6.0 gjs xvfb dbus
       - name: Compila
         run: python3 -m py_compile *.py tests/*.py
       - name: Linter (errores reales, ruff fijo)
@@ -56,4 +56,8 @@ jobs:
       - name: Pruebas
         env:
           RIPOWALL_REQUIERE_GUI: "1"   # si GTK no carga, falla en vez de saltarse las pruebas de la GUI
-        run: /usr/bin/python3 -m unittest discover -s tests -v
+          # Los runners no permiten el sandbox de bubblewrap de WebKit; las reglas de acceso a archivos que
+          # prueba test_renderer son de WebKit mismo y no dependen de él
+          WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS: "1"
+        # Pantalla virtual: la prueba de aislamiento de fondos web carga una página real en WebKit
+        run: dbus-run-session -- xvfb-run -a /usr/bin/python3 -m unittest discover -s tests -v

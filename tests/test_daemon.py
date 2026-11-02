@@ -88,5 +88,53 @@ class TestMonitores(unittest.TestCase):
         self.assertEqual(cfg["data_source"]["Default"], cfg["data_source"]["eDP-1"])
 
 
+class TestWatchWorkshop(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.config = os.path.join(self.tmp.name, "config.json")
+        for p in (mock.patch.object(H, "CONFIG_PATH", self.config),
+                  mock.patch.object(H, "CONFIG_HIDAMARI", os.path.join(self.tmp.name, "no-existe.json")),
+                  mock.patch.object(D, "reload_config", return_value=True),
+                  mock.patch.object(D, "log")):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _fondo(self, nombre, edad):
+        ruta = os.path.join(self.tmp.name, nombre)
+        open(ruta, "w").close()
+        os.utime(ruta, (edad, edad))
+        return types.SimpleNamespace(path=ruta, title=nombre)
+
+    def test_el_nuevo_de_verdad_pasa_a_default(self):
+        viejo = self._fondo("aaa-viejo.mp4", 1000)
+        nuevo = self._fondo("zzz-nuevo.mp4", 2000)    # alfabéticamente último: antes elegía «aaa»
+        H.save_config({"data_source": {"eDP-1": viejo.path, "Default": viejo.path}})
+        actuales = D.watch_workshop({viejo.path}, [viejo, nuevo])
+        self.assertEqual(actuales, {viejo.path, nuevo.path})
+        cfg = H.load_config()
+        self.assertEqual(cfg["data_source"]["Default"], nuevo.path)
+        self.assertEqual(cfg["data_source"]["eDP-1"], viejo.path, "no toca el monitor elegido")
+
+    def test_entre_varios_nuevos_elige_el_mas_reciente(self):
+        a, b, c = self._fondo("a.mp4", 1000), self._fondo("b.mp4", 3000), self._fondo("c.mp4", 2000)
+        H.save_config({"data_source": {}})
+        D.watch_workshop(set(), [a, b, c])
+        self.assertEqual(H.load_config()["data_source"]["Default"], b.path)
+
+    def test_no_pisa_cambios_de_la_gui(self):
+        viejo, nuevo = self._fondo("v.mp4", 1000), self._fondo("n.mp4", 2000)
+        H.save_config({"data_source": {"eDP-1": viejo.path}, "is_mute": False})   # lo que dejó la GUI
+        D.watch_workshop({viejo.path}, [viejo, nuevo])
+        self.assertIs(H.load_config()["is_mute"], False)
+
+    def test_solo_quitados_no_cambia_default(self):
+        a, b = self._fondo("a.mp4", 1000), self._fondo("b.mp4", 2000)
+        H.save_config({"data_source": {"Default": a.path}})
+        actuales = D.watch_workshop({a.path, b.path}, [a])
+        self.assertEqual(actuales, {a.path})
+        self.assertEqual(H.load_config()["data_source"]["Default"], a.path)
+
+
 if __name__ == "__main__":
     unittest.main()

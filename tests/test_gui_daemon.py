@@ -109,3 +109,39 @@ class TestRefreshDaemon(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipIf(G is None, "GTK4/Adwaita no disponibles")
+class TestBorrarFondo(unittest.TestCase):
+    """Al borrar un fondo original, sus presets dejan de ofrecerse y de estar asignados."""
+
+    def setUp(self):
+        import json
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.w = self.tmp.name
+        for wid, proyecto in (("200", {"type": "web"}), ("400", {"dependency": "200", "preset": {}}),
+                              ("410", {"dependency": "2000", "preset": {}}), ("300", {"type": "scene"})):
+            os.makedirs(os.path.join(self.w, wid))
+            with open(os.path.join(self.w, wid, "project.json"), "w") as f:
+                json.dump(proyecto, f)
+        self.fondos = [G.H.Wallpaper(title=wid, path=os.path.join(self.w, wid), workshop_id=wid, tipo="x")
+                       for wid in ("200", "400", "410", "300")]
+        self.config = {"data_source": {"eDP-1": os.path.join(self.w, "400"),
+                                       "HDMI-1": os.path.join(self.w, "410"),
+                                       "Default": os.path.join(self.w, "300")}}
+
+    def test_presets_del_original_borrado(self):
+        v = types.SimpleNamespace(_all_wallpapers=list(self.fondos), _refresh_gallery=lambda: None,
+                                  _refresh_monitors=lambda: None, _show_toast=lambda m: None,
+                                  _show_error=lambda m: self.fail(m))
+        guardada = {}
+        with mock.patch.object(G.H, "delete_wallpaper_files", return_value=True), \
+             mock.patch.object(G.H, "try_unsubscribe"), \
+             mock.patch.object(G.H, "load_config", return_value=self.config), \
+             mock.patch.object(G.H, "save_config", side_effect=lambda c: guardada.update(c) or True), \
+             mock.patch.object(G.H, "reload_config"):
+            G.RipoWallWindow._do_delete_wallpaper(v, self.fondos[0])   # borra el 200
+        self.assertEqual([w.workshop_id for w in v._all_wallpapers], ["410", "300"])
+        self.assertEqual(sorted(guardada["data_source"]), ["Default", "HDMI-1"])

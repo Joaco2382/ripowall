@@ -185,6 +185,82 @@ class TestConfigPropia(unittest.TestCase):
         self.assertIs(H.load_config()["is_pause_when_maximized"], False)
 
 
+class TestCatalogo(unittest.TestCase):
+    """get_all_wallpapers con un Workshop falso: un fondo de cada tipo."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.w = self.tmp.name
+        p = mock.patch.object(H, "WORKSHOP", self.w)
+        p.start()
+        self.addCleanup(p.stop)
+        self._fondo("100", {"title": "Video", "type": "video", "file": "a.mp4", "preview": "preview.jpg"},
+                    ["a.mp4", "preview.jpg"])
+        self._fondo("200", {"title": "Web", "type": "Web", "file": "index.html"}, ["index.html", "preview.gif"])
+        self._fondo("300", {"title": "Escena", "type": "scene", "file": "scene.json"}, ["scene.pkg"])
+        self._fondo("400", {"title": "Preset de web", "dependency": "200", "preset": {"color": "1 0 0"}}, [])
+        self._fondo("500", {"title": "Preset huérfano", "dependency": "999", "preset": {}}, [])
+        self._fondo("600", {"title": "Web sin html", "type": "web", "file": "index.html"}, [])
+        self._fondo("700", None, ["suelto.mp4"])                         # video sin project.json
+        os.makedirs(os.path.join(self.w, "800"))
+        with open(os.path.join(self.w, "800", "project.json"), "w") as f:
+            f.write("{roto")                                            # project.json corrupto
+
+    def _fondo(self, wid, proyecto, archivos):
+        d = os.path.join(self.w, wid)
+        os.makedirs(d)
+        if proyecto is not None:
+            with open(os.path.join(d, "project.json"), "w", encoding="utf-8") as f:
+                json.dump(proyecto, f)
+        for a in archivos:
+            open(os.path.join(d, a), "w").close()
+
+    def _catalogo(self, con_escenas):
+        with mock.patch.object(H, "escenas_disponibles", return_value=con_escenas):
+            return {w.workshop_id: w for w in H.get_all_wallpapers()}
+
+    def test_todos_los_tipos(self):
+        c = self._catalogo(con_escenas=True)
+        self.assertEqual({k: w.tipo for k, w in c.items()},
+                         {"100": "video", "200": "web", "300": "scene", "400": "preset", "700": "video"})
+        self.assertEqual(c["100"].path, os.path.join(self.w, "100", "a.mp4"))   # video: el archivo
+        self.assertEqual(c["200"].path, os.path.join(self.w, "200"))            # web: la carpeta
+        self.assertTrue(c["200"].preview_path.endswith("preview.gif"))
+        self.assertEqual(c["700"].title, "700")
+
+    def test_sin_motor_no_hay_escenas(self):
+        self.assertNotIn("300", self._catalogo(con_escenas=False))
+
+    def test_preset_de_escena_necesita_el_motor(self):
+        self._fondo("410", {"title": "Preset de escena", "dependency": "300", "preset": {}}, [])
+        self.assertIn("410", self._catalogo(con_escenas=True))
+        self.assertNotIn("410", self._catalogo(con_escenas=False))
+
+    def test_preset_de_web_sin_html_no_se_ofrece(self):
+        self._fondo("610", {"title": "Preset de web sin html", "dependency": "600", "preset": {}}, [])
+        self.assertNotIn("610", self._catalogo(con_escenas=True))
+
+    def test_carpeta_ilegible_no_corta_el_escaneo(self):
+        listdir = os.listdir
+
+        def falla_en_200(p):
+            if p == os.path.join(self.w, "200"):
+                raise PermissionError(13, "Permiso denegado", p)
+            return listdir(p)
+        with mock.patch.object(H.os, "listdir", side_effect=falla_en_200):
+            c = self._catalogo(con_escenas=True)
+        self.assertNotIn("200", c)
+        self.assertIn("100", c)
+        self.assertIn("300", c)
+
+    def test_tipo_de_proyecto(self):
+        self.assertEqual(H.tipo_de_proyecto({"type": "Scene"}), "scene")
+        self.assertEqual(H.tipo_de_proyecto({"dependency": "1", "preset": {}}), "preset")
+        self.assertIsNone(H.tipo_de_proyecto({"dependency": "1"}))
+        self.assertIsNone(H.tipo_de_proyecto({"type": "application"}))
+
+
 @unittest.skipIf(R is None and not os.environ.get("RIPOWALL_REQUIERE_GUI"), "GTK4 no disponible")
 class TestReglaDeReproduccion(unittest.TestCase):
     def test_tabla(self):

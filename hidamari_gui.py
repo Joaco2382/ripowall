@@ -720,27 +720,23 @@ class RipoWallWindow(Adw.ApplicationWindow):
         # 2. Intentar desuscribir de Steam
         H.try_unsubscribe(workshop_id)
 
-        # 3. Remover del catalogo en memoria
-        self._all_wallpapers = [
-            w for w in self._all_wallpapers
-            if not w.path.startswith(os.path.join(H.WORKSHOP, workshop_id))
-        ]
+        # 3. Remover del catalogo en memoria: el fondo y los presets que dependían de él
+        # (por ID exacto: comparar rutas con startswith confundía «100» con «1001»)
+        def ya_no_sirve(path: str) -> bool:
+            return path == wallpaper_path or H.depende_de(path, workshop_id)
+        self._all_wallpapers = [w for w in self._all_wallpapers
+                                if w.workshop_id != workshop_id and not ya_no_sirve(w.path)]
 
-        # 4. Limpiar asignaciones en monitores que usaban este wallpaper
-        try:
-            config = H.load_config()
-            data_source = config.get("data_source", {})
-            modified = False
-            for monitor, path in list(data_source.items()):
-                if path == wallpaper_path:
-                    del data_source[monitor]
-                    modified = True
-            if modified:
-                config["data_source"] = data_source
-                H.save_config(config)
-                H.reload_config()
-        except Exception:
-            pass
+        # 4. Limpiar asignaciones en monitores que usaban este wallpaper o uno de sus presets
+        config = H.load_config()
+        data_source = config.get("data_source", {})
+        usados = [m for m, path in data_source.items() if ya_no_sirve(path)]
+        for monitor in usados:
+            del data_source[monitor]
+        if usados and not H.save_config(config):
+            self._show_error("Se borró el fondo, pero no se pudo quitar de los monitores que lo usaban")
+        elif usados:
+            H.reload_config()
 
         # 5. Refrescar galeria (respeta filtro de busqueda activo)
         self._refresh_gallery()

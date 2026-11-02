@@ -37,9 +37,20 @@ function rutaRenderer() {
     return cands.find(p => p && GLib.file_test(p, GLib.FileTest.IS_EXECUTABLE)) ?? null;
 }
 
-/** El reproductor, lanzado como cliente Wayland propio de GNOME Shell. */
-class Renderer {
-    constructor() {
+/**
+ * Un programa lanzado como cliente Wayland propio de GNOME Shell (el reproductor o un motor de escenas):
+ * solo sus ventanas se reconocen como fondo, ninguna otra app puede hacerse pasar por él.
+ */
+class ClienteWayland {
+    /**
+     * @param {string} nombre      para el registro
+     * @param {() => string[]|null} argv  se evalúa en cada arranque (null: no se puede lanzar)
+     * @param {number} reintentos   cuántas veces se relanza si termina solo (Infinity: siempre)
+     */
+    constructor(nombre, argv, reintentos = Infinity) {
+        this.nombre = nombre;
+        this._argv = argv;
+        this._reintentos = reintentos;
         this._client = null;
         this._proc = null;
         this._cancel = null;
@@ -49,24 +60,37 @@ class Renderer {
 
     iniciar() {
         this._detenido = false;
-        const ruta = rutaRenderer();
-        if (!ruta) {
-            log('no se encontró ripowall-renderer (~/.local/bin o /usr/bin): sin fondo animado');
+        const argv = this._argv();
+        if (!argv) {
+            log(`${this.nombre}: no se puede lanzar (programa no encontrado)`);
             return;
         }
         const launcher = new Gio.SubprocessLauncher({
             flags: Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_MERGE,
         });
-        this._client = Meta.WaylandClient.new_subprocess(global.context, launcher, [ruta]);
-        this._proc = this._client.get_subprocess();
+        if (Meta.WaylandClient.new_subprocess) {  // GNOME 49 o más nuevo
+            this._client = Meta.WaylandClient.new_subprocess(global.context, launcher, argv);
+            this._proc = this._client.get_subprocess();
+        } else {  // GNOME 45 a 48: se crea el cliente y después se lanza
+            this._client = Meta.WaylandClient.new(global.context, launcher);
+            this._proc = this._client.spawnv(global.display, argv);
+        }
         this._cancel = new Gio.Cancellable();
-        log(`reproductor iniciado: ${ruta} (pid ${this._proc.get_identifier()})`);
+        log(`${this.nombre} iniciado: ${argv.join(' ')} (pid ${this._proc.get_identifier()})`);
         this._leerSalida(Gio.DataInputStream.new(this._proc.get_stdout_pipe()));
-        this._proc.wait_async(this._cancel, () => {
+        const proc = this._proc;
+        proc.wait_async(this._cancel, () => {
+            if (this._proc !== proc)
+                return;
             this._client = null;
             if (this._detenido)
                 return;
-            log(`el reproductor terminó (código ${this._proc.get_exit_status()}); se relanza en ${REINTENTO_RENDERER_MS} ms`);
+            if (this._reintentos <= 0) {
+                log(`${this.nombre} terminó (código ${proc.get_exit_status()}); no se relanza`);
+                return;
+            }
+            this._reintentos--;
+            log(`${this.nombre} terminó (código ${proc.get_exit_status()}); se relanza en ${REINTENTO_RENDERER_MS} ms`);
             this._reintentoId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, REINTENTO_RENDERER_MS, () => {
                 this._reintentoId = 0;
                 this.iniciar();
@@ -81,23 +105,28 @@ class Renderer {
                 const [linea] = s.read_line_finish_utf8(res);
                 if (linea === null)
                     return;
-                log(`reproductor: ${linea}`);
+                log(`${this.nombre}: ${linea}`);
             } catch (e) {
                 if (!e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
-                    log(`error leyendo al reproductor: ${e.message}`);
+                    log(`error leyendo a ${this.nombre}: ${e.message}`);
                 return;
             }
             this._leerSalida(stream);
         });
     }
 
-    /** ¿Esta ventana es del reproductor? (por dueño Wayland, no por título: no se puede falsificar) */
+    /** ¿Esta ventana es de este programa? (por dueño Wayland, no por título: no se puede falsificar) */
     esSuya(window) {
         try {
             return !!this._client && this._client.owns_window(window);
         } catch {
             return false;
         }
+    }
+
+    /** Pausa (SIGSTOP) o reanuda (SIGCONT) el proceso sin perder su estado. */
+    congelar(si) {
+        this._proc?.send_signal(si ? 19 : 18);
     }
 
     detener() {
@@ -107,10 +136,25 @@ class Renderer {
             this._reintentoId = 0;
         }
         this._cancel?.cancel();
+        this._proc?.send_signal(18);  // si estaba congelado, que pueda terminar
         this._proc?.force_exit();
         this._client = null;
         this._proc = null;
     }
+}
+
+/**
+ * Monitor de una ventana del reproductor, por su título «@ripowall!<conector>». Sin título todavía (o con
+ * conector desconocido «?»), -1: mientras tanto no se usa como fondo de ningún monitor, salvo que haya uno solo.
+ */
+function monitorDelReproductor(window) {
+    const titulo = window.get_title() ?? '';
+    if (!titulo.startsWith('@ripowall!'))
+        return -1;
+    const i = global.backend.get_monitor_manager().get_monitor_for_connector(titulo.slice('@ripowall!'.length));
+    if (i >= 0)
+        return i;
+    return global.display.get_n_monitors() === 1 ? 0 : -1;
 }
 
 /**
@@ -232,16 +276,181 @@ class Cobertura {
     }
 }
 
+const BUS_RENDERER = 'cl.ripotech.RipoWall.Renderer';
+const RUTA_RENDERER = '/cl/ripotech/RipoWall/Renderer';
+const ASSETS_WE = GLib.build_filenamev([GLib.get_home_dir(), '.local', 'share', 'Steam', 'steamapps',
+    'common', 'wallpaper_engine', 'assets']);
+
+/**
+ * Escenas de Wallpaper Engine: el reproductor publica en su acción «escenas» qué escena va en cada monitor
+ * ({conector: {carpeta, props, pausado, silencio, volumen}}); aquí se lanza linux-wallpaperengine para
+ * cada una, como cliente Wayland propio, y su ventana pasa a ser el fondo de ese monitor.
+ */
+class Escenas {
+    constructor(alCambiar) {
+        this._alCambiar = alCambiar;        // hay que rehacer los fondos (apareció o se fue una escena)
+        this._motores = new Map();          // conector -> {cliente, clave, pausado, ventana}
+        this._cancel = new Gio.Cancellable();  // consultas en curso: se cancelan al desactivar
+        this._destruida = false;
+        this._sub = Gio.DBus.session.signal_subscribe(BUS_RENDERER, 'org.gtk.Actions', 'Changed', RUTA_RENDERER,
+            null, Gio.DBusSignalFlags.NONE, (_c, _s, _p, _i, _sig, params) => {
+                const estados = params.deep_unpack()[2];
+                if ('escenas' in estados)
+                    this._aplicar(estados.escenas.deep_unpack());
+            });
+    }
+
+    /** Pide al reproductor su lista actual (al arrancar o reiniciarse). */
+    consultar() {
+        Gio.DBus.session.call(BUS_RENDERER, RUTA_RENDERER, 'org.gtk.Actions', 'Describe',
+            new GLib.Variant('(s)', ['escenas']), null, Gio.DBusCallFlags.NONE, -1, this._cancel, (c, res) => {
+                try {
+                    const [[, , estado]] = c.call_finish(res).deep_unpack();
+                    if (estado.length)
+                        this._aplicar(estado[0].deep_unpack());
+                } catch (e) {
+                    if (!e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
+                        log(`no se pudo leer las escenas del reproductor: ${e.message}`);
+                }
+            });
+    }
+
+    _aplicar(json) {
+        if (this._destruida)  // una respuesta que llega después de desactivar no lanza motores
+            return;
+        let deseadas;
+        try {
+            deseadas = JSON.parse(json);
+        } catch (e) {
+            log(`lista de escenas ilegible: ${e.message}`);
+            return;
+        }
+        for (const [conector, m] of [...this._motores]) {
+            if (!(conector in deseadas))
+                this._quitar(conector, m);
+        }
+        for (const [conector, e] of Object.entries(deseadas)) {
+            const clave = JSON.stringify([e.carpeta, e.props, e.silencio, e.volumen]);
+            const actual = this._motores.get(conector);
+            if (!actual || actual.clave !== clave) {
+                if (actual)
+                    this._quitar(conector, actual);
+                this._lanzar(conector, e, clave);
+            } else if (actual.pausado !== e.pausado) {
+                actual.pausado = e.pausado;
+                if (actual.ventana) {  // antes de su primer cuadro no se congela (el clon quedaría vacío)
+                    actual.cliente.congelar(e.pausado);
+                    log(`escena ${conector}: ${e.pausado ? 'pausada' : 'reanudada'}`);
+                }
+            }
+        }
+    }
+
+    _lanzar(conector, e, clave) {
+        const geo = global.display.get_monitor_geometry(this._monitor(conector));
+        const cliente = new ClienteWayland(`escena ${conector}`, () => {
+            const motor = GLib.find_program_in_path('linux-wallpaperengine');
+            if (!motor)
+                return null;
+            // --scaling fill va justo después de --window (se aplica a la salida anterior): las escenas
+            // que no son 16:9 se recortan para cubrir la pantalla, como en Wallpaper Engine
+            const argv = [motor, '--window', `0x0x${geo.width}x${geo.height}`, '--scaling', 'fill',
+                '--disable-mouse', '--fps', '30'];
+            if (GLib.file_test(ASSETS_WE, GLib.FileTest.IS_DIR))
+                argv.push('--assets-dir', ASSETS_WE);
+            argv.push(...(e.silencio ? ['--silent'] : ['--volume', String(e.volumen)]));
+            for (const [k, v] of Object.entries(e.props ?? {}))
+                argv.push('--set-property', `${k}=${v}`);
+            argv.push(e.carpeta);
+            return argv;
+        }, 1);
+        this._motores.set(conector, {cliente, clave, pausado: e.pausado, ventana: null});
+        cliente.iniciar();
+    }
+
+    _quitar(conector, m) {
+        m.cliente.detener();
+        this._motores.delete(conector);
+        if (m.ventana)
+            this._alCambiar();
+    }
+
+    /** Índice de monitor de un conector (el monitor virtual de las pruebas no tiene conector: «?»). */
+    _monitor(conector) {
+        const i = global.backend.get_monitor_manager().get_monitor_for_connector(conector);
+        return i >= 0 ? i : 0;
+    }
+
+    /** Monitor de la escena que dibuja `window`, o -1 si no es de una escena. */
+    monitorDe(window) {
+        const conector = this.deQuien(window);
+        return conector === null ? -1 : this._monitor(conector);
+    }
+
+    /** Si la ventana es de un motor de escenas, su conector; si no, null. */
+    deQuien(window) {
+        for (const [conector, m] of this._motores) {
+            if (m.cliente.esSuya(window))
+                return conector;
+        }
+        return null;
+    }
+
+    /**
+     * Ventana nueva de un motor: al mostrarse por primera vez se lleva a su monitor y a pantalla completa
+     * (antes de eso GNOME ignora el pedido) y pasa a ser el fondo. Hay que llamarla ANTES de crear su
+     * VentanaReproductor, para que esto corra antes de minimizarla.
+     */
+    ventanaNueva(window, conector) {
+        const m = this._motores.get(conector);
+        const id = window.connect_after('shown', () => {
+            window.disconnect(id);
+            window.move_to_monitor(this._monitor(conector));
+            window.make_fullscreen();
+            m.ventana = window;
+            if (m.pausado)
+                m.cliente.congelar(true);
+            this._alCambiar();
+        });
+    }
+
+    esEscena(window) {
+        return [...this._motores.values()].some(m => m.ventana === window);
+    }
+
+    destruir() {
+        this._destruida = true;
+        this._cancel.cancel();
+        Gio.DBus.session.signal_unsubscribe(this._sub);
+        this._motores.forEach(m => m.cliente.detener());
+        this._motores.clear();
+    }
+}
+
 export default class RipoWallExtension extends Extension {
     enable() {
-        this._renderer = new Renderer();
+        // El reproductor y las escenas son clientes Wayland de GNOME Shell: en una sesión X11 (GNOME 45-48
+        // todavía la ofrece) no hay cómo mostrarlos. Se avisa en vez de fallar sin decir nada.
+        // (GNOME 50 quitó X11 y con él Meta.is_wayland_compositor: si no existe, es Wayland)
+        if (Meta.is_wayland_compositor && !Meta.is_wayland_compositor()) {
+            this._sinWayland = true;
+            log('se necesita una sesión de GNOME en Wayland; esta es X11: RipoWall no hace nada');
+            Main.notify('RipoWall', 'Los fondos animados necesitan una sesión de GNOME en Wayland. ' +
+                'Cierra sesión y elige «GNOME» (no «GNOME en Xorg») con el engranaje de la pantalla de inicio.');
+            return;
+        }
+        this._renderer = new ClienteWayland('reproductor', () => {
+            const ruta = rutaRenderer();
+            return ruta ? [ruta] : null;
+        });
         this._ventanas = new Map();
         this._fondos = new Set();
         this._inyecciones = new InjectionManager();
         this._todasLasVentanas = () => global.get_window_actors();
 
         const ext = this;
-        const esRenderer = w => !!w && (ext._renderer.esSuya(w) || ext._ventanas.has(w));
+        this._escenas = new Escenas(() => this._recargarFondos());
+        const esRenderer = w => !!w && (ext._renderer.esSuya(w) || ext._ventanas.has(w) || !!ext._escenas?.deQuien(w));
 
         // 1) Fondo: en cada fondo de monitor, un clon en vivo de la ventana del reproductor de ese monitor
         this._inyecciones.overrideMethod(Background.BackgroundManager.prototype, '_createBackgroundActor',
@@ -270,6 +479,14 @@ export default class RipoWallExtension extends Extension {
             function (type, workspace) {
                 return original.call(this, type, workspace).filter(w => !esRenderer(w));
             });
+        // Las ventanas del reproductor y de las escenas están en pantalla completa (minimizadas), y mutter
+        // puede contarlas como «monitor en pantalla completa»: GNOME escondería la barra superior y
+        // silenciaría las notificaciones con el escritorio vacío. Solo cuenta una ventana ajena.
+        this._inyecciones.overrideMethod(Meta.Display.prototype, 'get_monitor_in_fullscreen', original =>
+            function (monitor) {
+                return original.call(this, monitor) && this.list_all_windows().some(w =>
+                    !esRenderer(w) && w.fullscreen && !w.minimized && w.get_monitor() === monitor);
+            });
         // Sin aviso «la ventana está lista» (GNOME lo muestra cuando una ventana nueva pide atención)
         this._inyecciones.overrideMethod(Main.windowAttentionHandler, '_onWindowDemandsAttention', original =>
             function (display, window) {
@@ -281,6 +498,17 @@ export default class RipoWallExtension extends Extension {
 
         // 3) Cada ventana nueva del reproductor: minimizada y registrada
         this._ventanaCreadaId = global.display.connect('window-created', (_d, window) => {
+            const conector = this._escenas.deQuien(window);
+            if (conector !== null) {
+                this._escenas.ventanaNueva(window, conector);  // primero: pantalla completa antes de minimizar
+                this._ventanas.set(window, new VentanaReproductor(window));
+                window.connect('unmanaged', () => {
+                    this._ventanas.get(window)?.soltar();
+                    this._ventanas?.delete(window);
+                });
+                log(`ventana de la escena del monitor ${conector}`);
+                return;
+            }
             if (!this._renderer.esSuya(window))
                 return;
             this._ventanas.set(window, new VentanaReproductor(window));
@@ -290,6 +518,7 @@ export default class RipoWallExtension extends Extension {
             });
             log(`ventana del reproductor: «${window.title}» en el monitor ${window.get_monitor()}`);
             this._cobertura?.olvidar();  // reproductor nuevo o reiniciado: reenviar qué monitores están tapados
+            this._escenas.consultar();
         });
 
         this._cobertura = new Cobertura(esRenderer, () => this._ventanas.size > 0);
@@ -306,26 +535,49 @@ export default class RipoWallExtension extends Extension {
             return;
         this._capturaId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 10, () => {
             this._capturaId = 0;
-            const stream = Gio.File.new_for_path(ruta).replace(null, false, Gio.FileCreateFlags.NONE, null);
-            new Shell.Screenshot().screenshot(false, stream, (obj, res) => {
-                try {
-                    obj.screenshot_finish(res);
-                    log(`captura de prueba: ${ruta}`);
-                } catch (e) {
-                    log(`captura de prueba falló: ${e.message}`);
-                }
-                stream.close(null);
-            });
+            if (Main.overview.visible) {  // GNOME arranca en la vista general: la captura es del escritorio
+                Main.overview.hide();
+                this._capturaId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 2, () => {
+                    this._capturaId = 0;
+                    this._capturar(ruta);
+                    return GLib.SOURCE_REMOVE;
+                });
+            } else {
+                this._capturar(ruta);
+            }
             return GLib.SOURCE_REMOVE;
         });
     }
 
+    _capturar(ruta) {
+        for (const w of global.display.list_all_windows())
+            log(`captura: ventana «${w.get_title()}» minimizada=${w.minimized} oculta=${w.is_hidden()} pantalla-completa=${w.fullscreen}`);
+        log(`captura: barra visible=${Main.panel.visible} monitor en pantalla completa=` +
+            `${Main.layoutManager.primaryMonitor?.inFullscreen} vista general=${Main.overview.visible}`);
+        const stream = Gio.File.new_for_path(ruta).replace(null, false, Gio.FileCreateFlags.NONE, null);
+        new Shell.Screenshot().screenshot(false, stream, (obj, res) => {
+            try {
+                obj.screenshot_finish(res);
+                log(`captura de prueba: ${ruta}`);
+            } catch (e) {
+                log(`captura de prueba falló: ${e.message}`);
+            }
+            stream.close(null);
+        });
+    }
+
     disable() {
+        if (this._sinWayland) {
+            this._sinWayland = false;
+            return;
+        }
         if (this._capturaId)
             GLib.source_remove(this._capturaId);
         global.display.disconnect(this._ventanaCreadaId);
         this._cobertura.destruir();
         this._cobertura = null;
+        this._escenas.destruir();
+        this._escenas = null;
         this._inyecciones.clear();
         this._renderer.detener();
         this._ventanas.forEach(v => v.soltar());
@@ -354,8 +606,14 @@ export default class RipoWallExtension extends Extension {
         let clon = null;
         let capaViva = true;
         const buscar = () => {
-            const ventana = this._todasLasVentanas().find(a =>
-                this._ventanas?.has(a.meta_window) && a.meta_window.get_monitor() === fondo.monitor);
+            const candidatas = this._todasLasVentanas().filter(a => this._ventanas?.has(a.meta_window));
+            // Cada ventana se asocia a su monitor por su conector, no por dónde la puso GNOME: al
+            // aparecer, todas parten en el monitor 0 hasta que pasan a pantalla completa en el suyo.
+            // Si el monitor tiene una escena andando, esa manda; si no, la ventana del reproductor.
+            const ventana = candidatas.find(a => this._escenas?.esEscena(a.meta_window) &&
+                    this._escenas.monitorDe(a.meta_window) === fondo.monitor) ??
+                candidatas.find(a => this._renderer?.esSuya(a.meta_window) &&
+                    monitorDelReproductor(a.meta_window) === fondo.monitor);
             if (!ventana)
                 return GLib.SOURCE_CONTINUE;
             clon = new Clutter.Clone({source: ventana, x_expand: true, y_expand: true});

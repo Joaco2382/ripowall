@@ -177,8 +177,9 @@ def check_display_server(report: DiagnosticReport) -> None:
         report.results.append(CheckResult("ENVIRONMENT", "Display server", "ok",
             "Wayland (XWayland disponible).", detail=f"WAYLAND={wayland}, DISPLAY={x11}"))
     elif x11:
-        report.results.append(CheckResult("ENVIRONMENT", "Display server", "ok",
-            f"X11 ({x11})."))
+        report.results.append(CheckResult("ENVIRONMENT", "Display server", "error",
+            f"Sesión X11 ({x11}): los fondos animados de RipoWall necesitan GNOME en Wayland.",
+            "Cerrar sesión y elegir «GNOME» (no «GNOME en Xorg») en el engranaje de la pantalla de inicio."))
     else:
         report.results.append(CheckResult("ENVIRONMENT", "Display server", "error",
             "No se detecto display server.", "Inicia sesion grafica antes de RipoWall."))
@@ -414,6 +415,37 @@ def check_renderer(report: DiagnosticReport) -> None:
             detail=(r.stderr or r.stdout).strip()))
 
 
+def decodificadores_h264() -> list[str]:
+    """Elementos de GStreamer que decodifican H.264 (el formato de casi todos los videos del Workshop)."""
+    try:
+        import gi
+        gi.require_version("Gst", "1.0")
+        from gi.repository import Gst
+    except (ImportError, ValueError):
+        return []
+    Gst.init(None)
+    tipo = Gst.ELEMENT_FACTORY_TYPE_DECODER | Gst.ELEMENT_FACTORY_TYPE_MEDIA_VIDEO
+    nombres = []
+    for fabrica in Gst.ElementFactory.list_get_elements(tipo, Gst.Rank.MARGINAL):
+        for plantilla in fabrica.get_static_pad_templates():
+            if plantilla.direction == Gst.PadDirection.SINK and "video/x-h264" in plantilla.get_caps().to_string():
+                nombres.append(fabrica.get_name())
+                break
+    return nombres
+
+
+def check_codec_h264(report: DiagnosticReport) -> None:
+    nombres = decodificadores_h264()
+    if nombres:
+        report.results.append(CheckResult("REPRODUCTOR", "Códec de video H.264", "ok",
+            f"Disponible ({', '.join(sorted(nombres))})."))
+        return
+    report.results.append(CheckResult("REPRODUCTOR", "Códec de video H.264", "error",
+        "No hay decodificador H.264 en GStreamer: los fondos de video no se van a reproducir.",
+        "Fedora: activar RPM Fusion e instalar gstreamer1-libav (o gstreamer1-plugin-openh264). "
+        "Ubuntu/Debian: gstreamer1.0-libav. Arch: gst-libav."))
+
+
 def check_extension(report: DiagnosticReport) -> None:
     r = _run(["gnome-extensions", "info", EXTENSION_UUID])
     estado = re.search(r"(?:State|Estado):\s*(\S+)", r.stdout)
@@ -518,7 +550,7 @@ ALL_CHECKS = [
     check_we_processes, check_cef_networking,
     check_ripowall_binaries, check_ripowall_systemd, check_obsolete_services,
     check_daemon_health, check_pre_deploy_syntax,
-    check_renderer, check_extension, check_ripowall_config,
+    check_renderer, check_extension, check_codec_h264, check_ripowall_config,
     check_workshop_content,
 ]
 

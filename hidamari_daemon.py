@@ -30,7 +30,6 @@ from hidamari_core import (
     sanitize_hidamari_config,
     reload_config,
     pick_random_wallpapers,
-    rebuild_flat_folder,
 )
 
 # Usar rutas del core (portable, multi-distro)
@@ -133,25 +132,31 @@ def assign_wallpapers_to_config(config, wallpapers, only=None):
     return config
 
 
-def watch_workshop(config, known_count):
-    """Detecta cambios en el Workshop y actualiza Default."""
-    wallpapers = get_all_wallpapers()
-    count = len(wallpapers)
+def watch_workshop(conocidos, wallpapers):
+    """Detecta fondos nuevos o quitados del Workshop. El más recién descargado pasa a Default.
 
-    if count != known_count:
-        if count < known_count:
-            log(f"Se eliminaron {known_count - count} wallpapers")
-        elif count > known_count and wallpapers:
-            log(f"Nuevo wallpaper: {wallpapers[0].title}")
+    conocidos: rutas vistas en la vuelta anterior. Devuelve las rutas actuales.
+    """
+    actuales = {w.path for w in wallpapers}
+    nuevos = [w for w in wallpapers if w.path not in conocidos]
+    quitados = conocidos - actuales
+    if quitados:
+        log(f"Se quitaron {len(quitados)} fondos del Workshop")
+    if nuevos:
+        log("Nuevo(s): " + ", ".join(w.title for w in nuevos[:5]) + (" ..." if len(nuevos) > 5 else ""))
 
-        rebuild_flat_folder()
+        def fecha(w):
+            try:
+                return os.path.getmtime(w.path)
+            except OSError:
+                return 0
 
-        if wallpapers and wallpapers[0].path != config.get("data_source", {}).get("Default", ""):
-            config["data_source"]["Default"] = wallpapers[0].path
-            save_config(config)
+        nuevo = max(nuevos, key=fecha)
+        config = load_config()  # fresca: no pisar lo que la GUI haya cambiado
+        config.setdefault("data_source", {})["Default"] = nuevo.path
+        if save_config(config):
             reload_config()
-
-    return count
+    return actuales
 
 
 def main():
@@ -206,7 +211,6 @@ def main():
     def rotate_minutes():
         return cli_rotate_minutes if cli_rotate_minutes is not None else get_rotate_minutes()
 
-    rebuild_flat_folder()  # limpia symlinks rotos de wallpapers borrados
     clean_monitors(config)
     if sanitize_hidamari_config(config):
         log("config.json reparada (fade_interval/audio_volume)")
@@ -228,7 +232,7 @@ def main():
         log("Listo (--once).")
         return
 
-    known_count = len(wallpapers)
+    conocidos = {w.path for w in wallpapers}
     last_rotate = time.time()
     # Para detectar cuando el usuario elige un wallpaper a mano desde la GUI
     last_ds = dict(load_config().get("data_source", {}))
@@ -258,11 +262,8 @@ def main():
 
             # 1. Workshop
             wallpapers = get_all_wallpapers()
-            if wallpapers:
-                new_count = len(wallpapers)
-                if new_count != known_count:
-                    known_count = watch_workshop(config, known_count)
-                    wallpapers = get_all_wallpapers()
+            if wallpapers and {w.path for w in wallpapers} != conocidos:
+                conocidos = watch_workshop(conocidos, wallpapers)
 
             # 2. Hotplug
             if monitor_watcher and monitor_watcher.poll() is None:

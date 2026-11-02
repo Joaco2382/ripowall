@@ -9,7 +9,6 @@ API:
   DBus:         assign_video_to_monitor(), pause_playback(), start_playback(), ...
   Rotación:     pick_random_wallpapers()
   Daemon:       get_daemon_status(), daemon_start(), daemon_stop(), daemon_logs()
-  Flat folder:  rebuild_flat_folder()
   Wallpaper Engine: launch_wallpaper_engine(), get_we_status(), kill_wallpaper_engine()
 """  # noqa: D100
 
@@ -27,29 +26,6 @@ from datetime import datetime
 from pathlib import Path
 
 # ── Funciones de path (portables) ───────────────────────────────────────────
-
-def _xdg_user_dir(name: str) -> str:
-    """Obtiene un directorio XDG usando xdg-user-dir, con fallback."""
-    try:
-        r = subprocess.run(
-            ["xdg-user-dir", name],
-            capture_output=True, text=True, timeout=3
-        )
-        path = r.stdout.strip()
-        if path and os.path.isdir(os.path.dirname(path) if not os.path.isdir(path) else path):
-            # Si no existe, crearlo
-            os.makedirs(path, exist_ok=True)
-            return path
-    except Exception:
-        pass
-    # Fallbacks segun locale
-    fallbacks = {
-        "VIDEOS": os.path.join(Path.home(), "Videos"),
-        "DESKTOP": os.path.join(Path.home(), "Desktop"),
-        "DOWNLOAD": os.path.join(Path.home(), "Downloads"),
-    }
-    return fallbacks.get(name, os.path.join(Path.home(), name.capitalize()))
-
 
 def _find_steam_workshop() -> str:
     """Detecta el directorio del Workshop de Steam, portable entre distros."""
@@ -72,7 +48,6 @@ WORKSHOP = _find_steam_workshop()
 CONFIG_PATH = os.path.join(Path.home(), ".config/ripowall/config.json")
 # Config de Hidamari: se copia una vez a CONFIG_PATH (mismos campos) al pasar al reproductor propio
 CONFIG_HIDAMARI = os.path.join(Path.home(), ".config/hidamari/config.json")
-FLAT_DIR = os.path.join(_xdg_user_dir("VIDEOS"), "Hidamari")
 THUMB_CACHE = os.path.join(Path.home(), ".cache/hidamari-gui/thumbnails")
 
 # Reproductor propio (ripowall-renderer): acciones de GApplication por D-Bus (org.gtk.Actions)
@@ -84,11 +59,13 @@ RENDERER_PATH = "/cl/ripotech/RipoWall/Renderer"
 
 @dataclass
 class Wallpaper:
+    """Un fondo del Workshop. path: el .mp4 si es video; la carpeta del Workshop si es web/escena/preset."""
     title: str
     path: str
     size_mb: float = 0.0
     workshop_id: str = ""
     preview_path: str | None = None
+    tipo: str = "video"  # video | web | scene | preset
 
     def __hash__(self):
         return hash(self.path)
@@ -110,52 +87,115 @@ class MonitorInfo:
 
 # ── Catálogo de Wallpapers ─────────────────────────────────────────────────
 
+def leer_proyecto(carpeta: str) -> dict:
+    """project.json de un fondo del Workshop ({} si no hay o está roto)."""
+    pj = os.path.join(carpeta, "project.json")
+    try:
+        with open(pj, encoding='utf-8', errors='replace') as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"[core] project.json ilegible en {carpeta}: {e}", flush=True)
+        return {}
+
+
+def tipo_de_proyecto(data: dict) -> str | None:
+    """video | web | scene según project.json; preset si solo trae dependency + preset."""
+    tipo = str(data.get("type", "")).lower()
+    if tipo in ("video", "web", "scene"):
+        return tipo
+    if not tipo and data.get("dependency") and isinstance(data.get("preset"), dict):
+        return "preset"
+    return None
+
+
+def depende_de(ruta: str, workshop_id: str) -> bool:
+    """True si `ruta` es un preset cuyo fondo original es `workshop_id` (sin él, el preset no se puede mostrar)."""
+    return os.path.isdir(ruta) and str(leer_proyecto(ruta).get("dependency", "")) == str(workshop_id)
+
+
+def _html_de_web(carpeta: str, data: dict) -> bool:
+    """Un fondo web se puede mostrar si existe su html de entrada."""
+    return os.path.isfile(os.path.join(carpeta, data.get("file") or "index.html"))
+
+
+def escenas_disponibles() -> bool:
+    """Las escenas se dibujan con linux-wallpaperengine: sin él no se ofrecen."""
+    return shutil.which("linux-wallpaperengine") is not None
+
+
 def get_all_wallpapers() -> list[Wallpaper]:
-    """Escanea el Workshop de Steam y devuelve todos los wallpapers MP4."""
+    """Escanea el Workshop de Steam y devuelve todos los fondos que RipoWall puede mostrar.
+
+    Videos (cada .mp4), web (index.html), escenas (si linux-wallpaperengine está instalado) y
+    presets (fondo web o escena de otra suscripción + sus ajustes), si su original está descargado.
+    """
     results = []
     if not os.path.isdir(WORKSHOP):
         print(f"[core] Workshop no encontrado en {WORKSHOP}. "
               "¿Steam instalado? ¿Wallpaper Engine suscrito?", flush=True)
         return results
+    con_escenas = escenas_disponibles()
     try:
-        for folder in os.listdir(WORKSHOP):
-            path = os.path.join(WORKSHOP, folder)
-            if not os.path.isdir(path):
-                continue
-            mp4s = [f for f in os.listdir(path) if f.endswith('.mp4')]
-            if not mp4s:
-                continue
-            title = folder
-            preview = None
-            pj = os.path.join(path, "project.json")
-            if os.path.exists(pj):
-                try:
-                    with open(pj, encoding='utf-8', errors='replace') as f:
-                        data = json.load(f)
-                    title = data.get("title", folder)
-                except Exception:
-                    pass
-            # Buscar preview
+        carpetas = os.listdir(WORKSHOP)
+    except OSError as e:
+        print(f"[core] No se pudo leer el Workshop: {e}", flush=True)
+        return results
+    for folder in carpetas:
+        path = os.path.join(WORKSHOP, folder)
+        if not os.path.isdir(path):
+            continue
+        data = leer_proyecto(path)
+        title = data.get("title") or folder
+        tipo = tipo_de_proyecto(data)
+        preview = None
+        declarada = data.get("preview")
+        if declarada and os.path.isfile(os.path.join(path, declarada)):
+            preview = os.path.join(path, declarada)
+        else:
             for ext in ('.jpg', '.png', '.gif', '.webp'):
                 prev = os.path.join(path, f"preview{ext}")
                 if os.path.exists(prev):
                     preview = prev
                     break
+
+        try:
+            mp4s = [f for f in os.listdir(path) if f.endswith('.mp4')]
+        except OSError as e:  # carpeta borrada por Steam a mitad del escaneo, o ilegible: se sigue con las demás
+            print(f"[core] No se pudo leer {path}: {e}", flush=True)
+            continue
+        if mp4s and tipo in (None, "video"):
             for mp4 in sorted(mp4s):
                 full = os.path.join(path, mp4)
                 try:
                     size_mb = os.path.getsize(full) / (1024 * 1024)
                 except OSError:
                     size_mb = 0
-                results.append(Wallpaper(
-                    title=title,
-                    path=full,
-                    size_mb=round(size_mb, 1),
-                    workshop_id=folder,
-                    preview_path=preview,
-                ))
-    except OSError:
-        pass
+                results.append(Wallpaper(title=title, path=full, size_mb=round(size_mb, 1),
+                                         workshop_id=folder, preview_path=preview, tipo="video"))
+            continue
+
+        if tipo == "preset":
+            carpeta_base = os.path.join(WORKSHOP, str(data["dependency"]))
+            base = leer_proyecto(carpeta_base)
+            tipo_base = tipo_de_proyecto(base)
+            if tipo_base == "web":
+                if not _html_de_web(carpeta_base, base):
+                    continue  # el original no tiene su html: el preset se vería en negro
+            elif tipo_base != "scene" or not con_escenas:
+                continue  # original no descargado o no soportado
+        elif tipo == "web":
+            if not _html_de_web(path, data):
+                continue
+        elif tipo == "scene":
+            if not con_escenas:
+                continue
+        else:
+            continue
+        results.append(Wallpaper(title=title, path=path, workshop_id=folder,
+                                 preview_path=preview, tipo=tipo))
     return sorted(results, key=lambda w: w.title.lower())
 
 
@@ -568,61 +608,6 @@ def daemon_logs(lines: int = 50) -> list[str]:
 
 
 # ── Flat Folder ─────────────────────────────────────────────────────────────
-
-def rebuild_flat_folder() -> int:
-    """Regenera symlinks en ~/Vídeos/Hidamari/. Retorna cantidad creada."""
-    os.makedirs(FLAT_DIR, exist_ok=True)
-    wallpapers = get_all_wallpapers()
-    current_paths = {w.path for w in wallpapers}
-
-    # Limpiar symlinks rotos
-    try:
-        for f in os.listdir(FLAT_DIR):
-            p = os.path.join(FLAT_DIR, f)
-            if os.path.islink(p):
-                if not os.path.exists(p) or os.path.realpath(p) not in current_paths:
-                    os.unlink(p)
-    except OSError:
-        pass
-
-    # Crear symlinks
-    existing_dsts = set()
-    try:
-        for f in os.listdir(FLAT_DIR):
-            p = os.path.join(FLAT_DIR, f)
-            if os.path.islink(p) and os.path.exists(p):
-                existing_dsts.add(os.path.realpath(p))
-    except OSError:
-        pass
-
-    count = 0
-    for wp in wallpapers:
-        if wp.path in existing_dsts:
-            count += 1
-            continue
-        safe = (wp.title.replace("/", "-").replace(":", " -")
-                .replace("?", "").replace("*", "").replace('"', "'")[:120])
-        ext = os.path.splitext(wp.path)[1]
-        dst = os.path.join(FLAT_DIR, f"{safe}{ext}")
-        if os.path.exists(dst):
-            base = os.path.join(FLAT_DIR, safe)
-            n = 2
-            while os.path.exists(f"{base}_{n}{ext}"):
-                n += 1
-            dst = f"{base}_{n}{ext}"
-        # Limpiar symlink roto si existe
-        if os.path.islink(dst):
-            try:
-                os.unlink(dst)
-            except OSError:
-                pass
-        try:
-            os.symlink(wp.path, dst)
-            count += 1
-        except OSError:
-            pass
-    return count
-
 
 # ── Delete / Unsubscribe ─────────────────────────────────────────────────────
 

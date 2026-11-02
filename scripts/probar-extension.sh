@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Prueba la extensión de RipoWall en un GNOME anidado (gnome-shell --devkit), sin tocar la sesión real:
 # dconf y extensiones van en una carpeta temporal, así nada queda activado en el escritorio de verdad.
-#   scripts/probar-extension.sh [segundos=25] [carpeta-de-salida]
+#   [FONDO=<ruta>] scripts/probar-extension.sh [segundos=25] [carpeta-de-salida]
 # Deja en la carpeta de salida: shell.log (registro de GNOME anidado) y captura.png (a los 10 s).
 #
 # OJO (2026-10-29): las variables XDG_* tienen que estar puestas ANTES de dbus-run-session. Si se ponen
@@ -28,6 +28,8 @@ for src in ("~/.config/ripowall/config.json", "~/.config/hidamari/config.json"):
     except (OSError, json.JSONDecodeError):
         cfg = {}
 cfg["is_pause_when_maximized"] = True
+if os.environ.get("FONDO"):  # FONDO=<ruta>: ese fondo en todos los monitores
+    cfg["data_source"] = {"Default": os.environ["FONDO"]}
 json.dump(cfg, open(sys.argv[1], "w", encoding="utf-8"))
 PY
 # Ventana maximizada de prueba: aparece a los 12 s y se cierra a los 18 s
