@@ -3,6 +3,8 @@
 # con los parches de engine/patches/ (personajes "puppet" de Wallpaper Engine).
 #   engine/instalar-motor.sh             instala o actualiza el motor
 #   engine/instalar-motor.sh --revisar   solo dice qué motor hay instalado
+#   engine/instalar-motor.sh --glfw-propio <versión>   (pruebas) sale con 0 si esa versión de GLFW obliga a
+#                                         compilar la propia
 # En Arch se construye el paquete linux-wallpaperengine-ripowall (engine/PKGBUILD) y pacman lo instala en lugar
 # de linux-wallpaperengine(-git), pidiendo confirmación. En otras distros se compila en ~/.cache/ripowall/motor,
 # se instala en ~/.local/share/ripowall/motor y se deja el comando linux-wallpaperengine en ~/.local/bin.
@@ -16,6 +18,10 @@ DESTINO="${XDG_DATA_HOME:-$HOME/.local/share}/ripowall/motor"
 BIN="$HOME/.local/bin"
 MARCA="$DESTINO/ripowall-motor.txt"
 PARCHES=("$DIR"/patches/*.patch)
+# GLFW 3.4 (X11 + Wayland), para distros cuyo GLFW es anterior: Ubuntu 24.04 trae 3.3 armado solo para X11, y
+# así el motor abriría su ventana por X11 (Xwayland) y la extensión no la reconocería como suya
+GLFW_REPO=https://github.com/glfw/glfw.git
+GLFW_TAG=3.4
 
 # commit + huella de los parches: si cambia cualquiera de los dos, hay que reinstalar
 version_esperada() {
@@ -58,8 +64,59 @@ instalar_arch() {
     (cd "$trabajo" && makepkg --syncdeps --install --needed)
 }
 
+# Dependencias para compilar el motor (las de su README + Wayland), con el gestor de paquetes de la distro
+instalar_dependencias() {
+    if command -v apt-get >/dev/null; then
+        sudo apt-get update && sudo apt-get install -y git pkg-config build-essential cmake \
+            libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl-dev libglew-dev freeglut3-dev libsdl2-dev \
+            liblz4-dev libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libxxf86vm-dev libglm-dev \
+            libglfw3-dev libmpv-dev libpulse-dev libfftw3-dev libfreetype-dev \
+            libwayland-dev wayland-protocols libegl-dev libxkbcommon-dev
+    elif command -v dnf >/dev/null; then
+        sudo dnf install -y git pkgconf-pkg-config gcc gcc-c++ cmake make \
+            libXrandr-devel libXinerama-devel libXcursor-devel libXi-devel mesa-libGL-devel mesa-libEGL-devel \
+            glew-devel freeglut-devel SDL2-devel lz4-devel ffmpeg-free-devel libXxf86vm-devel glm-devel glfw-devel \
+            mpv-devel pulseaudio-libs-devel fftw-devel gmp-devel freetype-devel \
+            wayland-devel wayland-protocols-devel libxkbcommon-devel
+    elif command -v zypper >/dev/null; then
+        sudo zypper install -y git pkg-config gcc-c++ cmake make libXrandr-devel libXinerama-devel \
+            libXcursor-devel libXi-devel Mesa-libGL-devel Mesa-libEGL-devel glew-devel freeglut-devel \
+            libSDL2-devel liblz4-devel ffmpeg-7-libavcodec-devel ffmpeg-7-libavformat-devel \
+            ffmpeg-7-libavutil-devel ffmpeg-7-libswscale-devel libXxf86vm-devel glm-devel libglfw-devel \
+            mpv-devel libpulse-devel fftw3-devel freetype2-devel wayland-devel wayland-protocols-devel \
+            libxkbcommon-devel
+    else
+        echo "Gestor de paquetes no reconocido: instala a mano las dependencias de" >&2
+        echo "  https://github.com/Almamu/linux-wallpaperengine#-installation" >&2
+        return 1
+    fi
+}
+
+# 0 si la versión de GLFW es anterior a 3.4 (hay que compilar la propia)
+necesita_glfw_propio() {
+    [ -z "$1" ] && return 0
+    [ "$(printf '%s\n%s\n' "$1" "$GLFW_TAG" | sort -V | head -1)" != "$GLFW_TAG" ]
+}
+
+# GLFW 3.4 propio, dentro de la carpeta del motor (el comando del motor lo carga con LD_LIBRARY_PATH);
+# no toca los paquetes del sistema
+instalar_glfw_propio() {
+    local fuente="$CACHE/glfw" build="$CACHE/glfw-build"
+    [ -d "$fuente/.git" ] || git clone --quiet "$GLFW_REPO" "$fuente"
+    git -C "$fuente" fetch --quiet --tags origin
+    git -C "$fuente" checkout --quiet --force "$GLFW_TAG"
+    cmake -B "$build" -S "$fuente" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$DESTINO" \
+        -DCMAKE_INSTALL_LIBDIR=lib -DBUILD_SHARED_LIBS=ON -DGLFW_BUILD_X11=ON -DGLFW_BUILD_WAYLAND=ON \
+        -DGLFW_BUILD_EXAMPLES=OFF -DGLFW_BUILD_TESTS=OFF -DGLFW_BUILD_DOCS=OFF -Wno-dev
+    cmake --build "$build" -j "$(nproc)"
+    cmake --install "$build"
+}
+
 instalar_compilando() {
     local fuente="$CACHE/fuente" build="$CACHE/build"
+    if [ "${RIPOWALL_SIN_DEPENDENCIAS:-}" != 1 ]; then
+        instalar_dependencias || exit 1
+    fi
     for programa in git cmake make c++ pkg-config; do
         command -v "$programa" >/dev/null || {
             echo "Falta $programa. Las dependencias para compilar el motor están en:" >&2
@@ -84,6 +141,10 @@ instalar_compilando() {
     rm -rf "$DESTINO"
     cmake --install "$build"
     chmod +x "$DESTINO/linux-wallpaperengine"
+    if necesita_glfw_propio "$(pkg-config --modversion glfw3 2>/dev/null || true)"; then
+        echo "GLFW del sistema anterior a $GLFW_TAG: se compila GLFW $GLFW_TAG (X11 + Wayland) para el motor"
+        instalar_glfw_propio
+    fi
 
     mkdir -p "$BIN"
     cat > "$BIN/linux-wallpaperengine" << EOF
@@ -105,6 +166,7 @@ EOF
 
 case "${1:-}" in
     --revisar) revisar ;;
+    --glfw-propio) necesita_glfw_propio "${2:-}" ;;
     "")
         if [ -f /etc/arch-release ] && command -v makepkg >/dev/null; then
             instalar_arch

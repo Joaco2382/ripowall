@@ -36,6 +36,7 @@ dependencias de compilación de upstream (lista en su README) y el comando queda
 | `0007-pointer-at-rest` | Sin mouse (`--disable-mouse`, como lanza RipoWall) el puntero queda al centro: el paralaje ya no corre la escena | 1982331270, 2069970082 |
 | `0008-fill-fit-side` | `fill`/`fit` eligen el lado a recortar por la escala y no por píxeles truncados | 2069970082 |
 | `0009-unique-framebuffers` | Buffers `unique` de los efectos resueltos por su nombre de escena (`_rt_FullCompoBuffer1_12_33`) | 5 escenas con ese aviso |
+| `0010-pulseaudio-reconnect` | Arreglo de upstream (40e40b59, #704) traído al commit fijo: sin servidor de audio, el detector esperaba para siempre y el motor nunca dibujaba; si el servidor se reinicia, ya no aborta | — (Docker y equipos sin PulseAudio/PipeWire) |
 
 ## Qué arregla el parche de los puppets
 

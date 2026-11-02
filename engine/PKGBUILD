@@ -7,7 +7,7 @@ pkgname=linux-wallpaperengine-ripowall
 _pkgname=linux-wallpaperengine
 _commit=38a5d60cf549fcead9a8880a4831b852ab95b92d
 pkgver=r640.38a5d60c
-pkgrel=2
+pkgrel=3
 pkgdesc="linux-wallpaperengine con los arreglos de RipoWall (personajes puppet de Wallpaper Engine)"
 arch=('x86_64')
 url="https://github.com/Almamu/linux-wallpaperengine"
@@ -25,7 +25,8 @@ source=("${_pkgname}::git+https://github.com/Almamu/linux-wallpaperengine.git#co
         '0006-auto-projection.patch'
         '0007-pointer-at-rest.patch'
         '0008-fill-fit-side.patch'
-        '0009-unique-framebuffers.patch')
+        '0009-unique-framebuffers.patch'
+        '0010-pulseaudio-reconnect.patch')
 sha512sums=('SKIP'
             'ea02b7341a4144ca700bc135f13e3c33e460f8c9614ef7e53fe7e0aa71243ee9aba53d15f05100a979c3b4e8fbc876d0663ea6003fde498c1172ad50ebeace22'
             '79ebf32025d5b6dc2ae07342f99ef4d5dff0e2bcdd911a5633a61856ab28b9c324ae8c12e1133a9538ed30106657df432ec1010c7f08a0f98fbf65b8ce026a11'
@@ -35,7 +36,8 @@ sha512sums=('SKIP'
             '8efcdb973c52e36bc4354d01a69509ffe9d388a525e24116d89fdc943563b6eadaf9cd6808c1e0fb69f3737e60d494305efb80b3f41b2178de9a6e48164d40d3'
             '983d08f60870fc4a64b76d3b6369446052de432a23dffb2e572f0feb15f419376b985262a0b537edb65c958275383f170c0302cac8dd1b55819522651a810e73'
             '9e7223812251bbf54426907272d394c17ba86f495433de80746c7b059f186b2ff402ab622f29feab5aba7406366cf2b0cd85f8b6773c7cf1b42a066d15068286'
-            '02e02bbe6e37752562304d3e5c08d676f37b14f8114cbffe5b339b1a89d2e09e1e38f4d1849fea84f7222c912902efb69428e3d186d7493a758832d66f8b4138')
+            '02e02bbe6e37752562304d3e5c08d676f37b14f8114cbffe5b339b1a89d2e09e1e38f4d1849fea84f7222c912902efb69428e3d186d7493a758832d66f8b4138'
+            '6466c98d3675700f8782269ec7efa2717432378c06b1352197a70add2ecd6ac82c35cc893b164cc5a8f9bd39d736c567b52397a1af3d8e946e952e095bc06090')
 
 prepare() {
     cd "${_pkgname}"

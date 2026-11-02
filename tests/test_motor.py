@@ -134,5 +134,21 @@ class TestMotor(unittest.TestCase):
         self.assertNotIn("RipoWall instalado", resultado.stdout)
 
 
+
+class TestGlfwPropio(unittest.TestCase):
+    """Con GLFW anterior a 3.4 (Ubuntu 24.04: 3.3 solo X11) el instalador compila GLFW 3.4 para el motor."""
+
+    def _necesita(self, version):
+        return subprocess.run(["bash", os.path.join(ENGINE, "instalar-motor.sh"), "--glfw-propio", version],
+                              capture_output=True, timeout=30).returncode == 0
+
+    def test_versiones(self):
+        self.assertTrue(self._necesita("3.3.10"))
+        self.assertTrue(self._necesita(""))          # sin GLFW de desarrollo
+        self.assertFalse(self._necesita("3.4"))
+        self.assertFalse(self._necesita("3.4.0"))
+        self.assertFalse(self._necesita("3.5.1"))
+
+
 if __name__ == "__main__":
     unittest.main()
