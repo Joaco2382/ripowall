@@ -44,6 +44,15 @@ jobs:
         run: python3 -m py_compile *.py tests/*.py
       - name: Linter (errores reales, ruff fijo)
         run: pipx run ruff==0.14.3 check --select E9,F .
+      - name: Parches del motor (se aplican sobre el commit fijo de engine/motor.conf)
+        run: |
+          . engine/motor.conf
+          git init -q /tmp/motor && cd /tmp/motor
+          git fetch -q --depth 1 "$MOTOR_REPO" "$MOTOR_COMMIT"
+          git checkout -q FETCH_HEAD
+          git submodule update --init --depth 1 -q   # hay parches que cambian submódulos (glslang)
+          # en orden y aplicándolos de verdad: cada parche puede depender de los anteriores
+          for parche in "$GITHUB_WORKSPACE"/engine/patches/*.patch; do git apply --verbose "$parche"; done
       - name: Pruebas
         env:
           RIPOWALL_REQUIERE_GUI: "1"   # si GTK no carga, falla en vez de saltarse las pruebas de la GUI

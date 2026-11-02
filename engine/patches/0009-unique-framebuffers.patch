@@ -1,0 +1,140 @@
+From eb993a2823195c5941216f10fdfe21089be5cf67 Mon Sep 17 00:00:00 2001
+From: Joaco2382 <104966815+Joaco2382@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 11:19:26 -0300
+Subject: [PATCH] fix: resolve effects' unique framebuffers by their scene name
+
+Effects can declare framebuffers as "unique" (the motion blur effect's
+_rt_FullCompoBuffer1). Scenes reference them from their passes as
+<name>_<object id>_<effect id> (_rt_FullCompoBuffer1_12_33), a name the
+engine never registered, so the texture couldn't be resolved
+(workshop 1590620004, 2640039186, 2009158089, 2202817665, 1522352870).
+
+Unique framebuffers are now also registered under that name and, for
+scenes that don't save effect ids, under the names this effect's own passes
+use for them with the object's prefix.
+
+Tests: UniqueFbo (1 case).
+---
+ CMakeLists.txt                                |  3 ++-
+ src/WallpaperEngine/Render/FBOProvider.cpp    |  9 +++++++-
+ src/WallpaperEngine/Render/FBOProvider.h      | 10 +++++++++
+ src/WallpaperEngine/Render/Objects/CImage.cpp | 14 +++++++++++++
+ .../Testing/Cases/UniqueFbo.cpp               | 21 +++++++++++++++++++
+ 5 files changed, 55 insertions(+), 2 deletions(-)
+ create mode 100644 src/WallpaperEngine/Testing/Cases/UniqueFbo.cpp
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 3bdf3f64..81216188 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -582,7 +582,8 @@ if(BUILD_TESTING)
+         src/WallpaperEngine/Testing/Cases/HlslShapes.cpp
+         src/WallpaperEngine/Testing/Cases/AutoProjection.cpp
+         src/WallpaperEngine/Testing/Cases/ScenePointer.cpp
+-        src/WallpaperEngine/Testing/Cases/WallpaperScaling.cpp)
++        src/WallpaperEngine/Testing/Cases/WallpaperScaling.cpp
++        src/WallpaperEngine/Testing/Cases/UniqueFbo.cpp)
+ endif()
+ 
+ add_library(
+diff --git a/src/WallpaperEngine/Render/FBOProvider.cpp b/src/WallpaperEngine/Render/FBOProvider.cpp
+index 556a6ebf..5aa1c40d 100644
+--- a/src/WallpaperEngine/Render/FBOProvider.cpp
++++ b/src/WallpaperEngine/Render/FBOProvider.cpp
+@@ -38,4 +38,11 @@ std::shared_ptr<CFBO> FBOProvider::find (const std::string& name) const {
+     }
+ 
+     return this->m_parent->find (name);
+-}
+\ No newline at end of file
++}
++std::string FBOProvider::uniqueName (const std::string& name, int objectId, int effectId) {
++    return uniqueNamePrefix (name, objectId) + std::to_string (effectId);
++}
++
++std::string FBOProvider::uniqueNamePrefix (const std::string& name, int objectId) {
++    return name + "_" + std::to_string (objectId) + "_";
++}
+diff --git a/src/WallpaperEngine/Render/FBOProvider.h b/src/WallpaperEngine/Render/FBOProvider.h
+index 29dd2fdd..1b4d1d1e 100644
+--- a/src/WallpaperEngine/Render/FBOProvider.h
++++ b/src/WallpaperEngine/Render/FBOProvider.h
+@@ -20,6 +20,16 @@ public:
+     std::shared_ptr<CFBO> alias (const std::string& newName, const std::string& original);
+     [[nodiscard]] std::shared_ptr<CFBO> find (const std::string& name) const;
+ 
++    /**
++     * Name Wallpaper Engine gives to an effect's "unique" framebuffer, the one scenes use to reference it from other
++     * passes (for example "_rt_FullCompoBuffer1_12_33" for the motion blur effect 33 of object 12)
++     */
++    [[nodiscard]] static std::string uniqueName (const std::string& name, int objectId, int effectId);
++    /**
++     * The part of uniqueName that doesn't depend on the effect ("_rt_FullCompoBuffer1_12_")
++     */
++    [[nodiscard]] static std::string uniqueNamePrefix (const std::string& name, int objectId);
++
+ private:
+     const FBOProvider* m_parent;
+     std::map<std::string, std::shared_ptr<CFBO>> m_fbos = {};
+diff --git a/src/WallpaperEngine/Render/Objects/CImage.cpp b/src/WallpaperEngine/Render/Objects/CImage.cpp
+index 8641acdc..27a16a82 100644
+--- a/src/WallpaperEngine/Render/Objects/CImage.cpp
++++ b/src/WallpaperEngine/Render/Objects/CImage.cpp
+@@ -6,6 +6,7 @@
+ #include <cstring>
+ #include <iterator>
+ #include <optional>
++#include <ranges>
+ #include <sstream>
+ 
+ #include <glm/glm.hpp>
+@@ -624,6 +625,19 @@ void CImage::setup () {
+ 	    // create all the fbos for this effect
+ 	    for (const auto& fbo : cur->effect->fbos) {
+ 		fboProvider->create (*fbo, this->m_texture->getFlags (), this->getSize ());
++		// scenes reference unique framebuffers by their object and effect specific name. Older scenes don't
++		// save effect ids, so the names this effect's own passes use are registered too
++		if (fbo->unique) {
++		    fboProvider->alias (FBOProvider::uniqueName (fbo->name, this->getImage ().id, cur->id), fbo->name);
++		    const std::string objectPrefix = FBOProvider::uniqueNamePrefix (fbo->name, this->getImage ().id);
++		    for (const auto& passOverride : cur->passOverrides) {
++			for (const auto& texture : passOverride->textures | std::views::values) {
++			    if (texture.starts_with (objectPrefix) && fboProvider->find (texture) == nullptr) {
++				fboProvider->alias (texture, fbo->name);
++			    }
++			}
++		    }
++		}
+ 	    }
+ 
+ 	    // TODO: MAKE USE OF ZIP OPERATOR IN BOOST? WAY OVERKILL JUST FOR THIS...
+diff --git a/src/WallpaperEngine/Testing/Cases/UniqueFbo.cpp b/src/WallpaperEngine/Testing/Cases/UniqueFbo.cpp
+new file mode 100644
+index 00000000..f2667074
+--- /dev/null
++++ b/src/WallpaperEngine/Testing/Cases/UniqueFbo.cpp
+@@ -0,0 +1,21 @@
++#include <catch2/catch_test_macros.hpp>
++
++#include "WallpaperEngine/Render/FBOProvider.h"
++
++using WallpaperEngine::Render::FBOProvider;
++
++// names that workshop scenes use for the motion blur effect's unique "_rt_FullCompoBuffer1": object 12 effect 33
++// (workshop 1590620004) and object 14 effect 45 (workshop 2640039186)
++TEST_CASE ("Unique effect framebuffers are named after their object and effect") {
++    CHECK (FBOProvider::uniqueName ("_rt_FullCompoBuffer1", 12, 33) == "_rt_FullCompoBuffer1_12_33");
++    CHECK (FBOProvider::uniqueName ("_rt_FullCompoBuffer1", 14, 45) == "_rt_FullCompoBuffer1_14_45");
++    // scenes without effect ids still reference it as "_rt_FullCompoBuffer1_83_205" (workshop 1522352870)
++    CHECK (
++	std::string ("_rt_FullCompoBuffer1_83_205")
++	    .starts_with (FBOProvider::uniqueNamePrefix ("_rt_FullCompoBuffer1", 83))
++    );
++    CHECK_FALSE (
++	std::string ("_rt_FullCompoBuffer1_830_205")
++	    .starts_with (FBOProvider::uniqueNamePrefix ("_rt_FullCompoBuffer1", 83))
++    );
++}
+-- 
+2.56.0
+

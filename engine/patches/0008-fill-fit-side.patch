@@ -1,0 +1,162 @@
+From 89c3d15072a64f23b07436bfb0531d1f409be04d Mon Sep 17 00:00:00 2001
+From: Joaco2382 <104966815+Joaco2382@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 11:12:17 -0300
+Subject: [PATCH] fix: fill and fit pick the side to crop from the scale, not
+ rounded pixels
+
+Fill and fit scaled the projection to the viewport, truncated the result to
+whole pixels and compared it with the viewport to decide which side to crop
+or pad. When the scale isn't a whole number of pixels the matching side came
+out one pixel short (2508 * 1280 / 2508.0 = 1279.99 -> 1279), so a portrait
+scene was stretched sideways (u from -0.47 to 1.47, streaks on both sides)
+instead of cropped vertically (workshop 2069970082).
+
+The side whose scale was picked is the one that matches; the scaled sizes
+are rounded instead of truncated.
+
+Tests: WallpaperScaling (3 cases).
+---
+ CMakeLists.txt                                |  3 +-
+ src/WallpaperEngine/Render/WallpaperState.cpp | 36 ++++++++++----
+ .../Testing/Cases/WallpaperScaling.cpp        | 49 +++++++++++++++++++
+ 3 files changed, 77 insertions(+), 11 deletions(-)
+ create mode 100644 src/WallpaperEngine/Testing/Cases/WallpaperScaling.cpp
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index fac8d9bc..3bdf3f64 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -581,7 +581,8 @@ if(BUILD_TESTING)
+         src/WallpaperEngine/Testing/Cases/ShaderVaryings.cpp
+         src/WallpaperEngine/Testing/Cases/HlslShapes.cpp
+         src/WallpaperEngine/Testing/Cases/AutoProjection.cpp
+-        src/WallpaperEngine/Testing/Cases/ScenePointer.cpp)
++        src/WallpaperEngine/Testing/Cases/ScenePointer.cpp
++        src/WallpaperEngine/Testing/Cases/WallpaperScaling.cpp)
+ endif()
+ 
+ add_library(
+diff --git a/src/WallpaperEngine/Render/WallpaperState.cpp b/src/WallpaperEngine/Render/WallpaperState.cpp
+index 6f9dc1a3..45578271 100644
+--- a/src/WallpaperEngine/Render/WallpaperState.cpp
++++ b/src/WallpaperEngine/Render/WallpaperState.cpp
+@@ -1,7 +1,9 @@
+ #include "WallpaperState.h"
++
+ #include "TextureProvider.h"
+ #include "WallpaperEngine/Logging/Log.h"
+ #include <algorithm>
++#include <cmath>
+ 
+ using namespace WallpaperEngine::Render;
+ 
+@@ -80,13 +82,20 @@ template <> void WallpaperState::updateTextureUVs<WallpaperState::TextureUVsScal
+     const float m1 = static_cast<float> (viewportWidth) / projectionWidth;
+     const float m2 = static_cast<float> (viewportHeight) / projectionHeight;
+     const float m = std::max (m1, m2);
+-    projectionWidth *= m;
+-    projectionHeight *= m;
++    if (m1 == m2) {
++	return;
++    }
+ 
+-    if (projectionWidth != viewportWidth) {
+-	this->updateUs (projectionWidth, projectionHeight);
+-    } else if (projectionHeight != viewportHeight) {
++    // the side whose scale was picked already matches the viewport, the other one gets cropped or padded. Comparing
++    // the scaled sizes in whole pixels picked the wrong side when the scale isn't a whole number of pixels
++    // (2508 * 1280 / 2508.0 gives 1279.99, truncated to 1279)
++    projectionWidth = static_cast<int> (std::lround (projectionWidth * m));
++    projectionHeight = static_cast<int> (std::lround (projectionHeight * m));
++
++    if (m == m1) {
+ 	this->updateVs (projectionWidth, projectionHeight);
++    } else {
++	this->updateUs (projectionWidth, projectionHeight);
+     }
+ }
+ 
+@@ -101,13 +110,20 @@ template <> void WallpaperState::updateTextureUVs<WallpaperState::TextureUVsScal
+     const float m1 = static_cast<float> (viewportWidth) / projectionWidth;
+     const float m2 = static_cast<float> (viewportHeight) / projectionHeight;
+     const float m = std::min (m1, m2);
+-    projectionWidth *= m;
+-    projectionHeight *= m;
++    if (m1 == m2) {
++	return;
++    }
+ 
+-    if (projectionWidth != viewportWidth) {
+-	this->updateUs (projectionWidth, projectionHeight);
+-    } else if (projectionHeight != viewportHeight) {
++    // the side whose scale was picked already matches the viewport, the other one gets cropped or padded. Comparing
++    // the scaled sizes in whole pixels picked the wrong side when the scale isn't a whole number of pixels
++    // (2508 * 1280 / 2508.0 gives 1279.99, truncated to 1279)
++    projectionWidth = static_cast<int> (std::lround (projectionWidth * m));
++    projectionHeight = static_cast<int> (std::lround (projectionHeight * m));
++
++    if (m == m1) {
+ 	this->updateVs (projectionWidth, projectionHeight);
++    } else {
++	this->updateUs (projectionWidth, projectionHeight);
+     }
+ }
+ 
+diff --git a/src/WallpaperEngine/Testing/Cases/WallpaperScaling.cpp b/src/WallpaperEngine/Testing/Cases/WallpaperScaling.cpp
+new file mode 100644
+index 00000000..bac666e7
+--- /dev/null
++++ b/src/WallpaperEngine/Testing/Cases/WallpaperScaling.cpp
+@@ -0,0 +1,49 @@
++#include <catch2/catch_approx.hpp>
++#include <catch2/catch_test_macros.hpp>
++
++#include "WallpaperEngine/Render/WallpaperState.h"
++
++using Catch::Approx;
++using WallpaperEngine::Render::WallpaperState;
++
++namespace {
++auto uvs (WallpaperState::TextureUVsScaling mode, int projectionWidth, int projectionHeight) {
++    WallpaperState state (mode, 0);
++    state.updateState ({ 0, 0, 1280, 720 }, true, projectionWidth, projectionHeight);
++    return state.getTextureUVs ();
++}
++} // namespace
++
++// workshop 2069970082 is 2508x2727: 2508 * (1280 / 2508.0) gave 1279.99, truncated to 1279, so fill decided the width
++// didn't match and stretched it (u from -0.47 to 1.47: streaks on both sides) instead of cropping the height
++TEST_CASE ("Fill crops the side that overflows even when the scale isn't a whole number of pixels") {
++    const auto portrait = uvs (WallpaperState::TextureUVsScaling::ZoomFillUVs, 2508, 2727);
++    CHECK (portrait.ustart == Approx (0.0f));
++    CHECK (portrait.uend == Approx (1.0f));
++    CHECK (portrait.vstart > 0.0f);
++    CHECK (portrait.vend < 1.0f);
++    CHECK (portrait.vend - portrait.vstart == Approx (720.0f / (2727.0f * 1280.0f / 2508.0f)).epsilon (0.01));
++
++    // wider than the screen: the width gets cropped and the height stays whole
++    const auto wide = uvs (WallpaperState::TextureUVsScaling::ZoomFillUVs, 3840, 1080);
++    CHECK (wide.ustart > 0.0f);
++    CHECK (wide.uend < 1.0f);
++    CHECK (wide.vstart == Approx (0.0f));
++    CHECK (wide.vend == Approx (1.0f));
++}
++
++TEST_CASE ("Fit pads the side that's too short") {
++    const auto portrait = uvs (WallpaperState::TextureUVsScaling::ZoomFitUVs, 2508, 2727);
++    CHECK (portrait.ustart < 0.0f);
++    CHECK (portrait.uend > 1.0f);
++    CHECK (portrait.vstart == Approx (0.0f));
++    CHECK (portrait.vend == Approx (1.0f));
++}
++
++TEST_CASE ("A scene with the screen's proportions is shown whole") {
++    const auto same = uvs (WallpaperState::TextureUVsScaling::ZoomFillUVs, 1920, 1080);
++    CHECK (same.ustart == Approx (0.0f));
++    CHECK (same.uend == Approx (1.0f));
++    CHECK (same.vstart == Approx (0.0f));
++    CHECK (same.vend == Approx (1.0f));
++}
+-- 
+2.56.0
+

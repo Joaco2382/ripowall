@@ -1,0 +1,218 @@
+From 898b1ad07a546829b40a4ae226e0d08c8bca2568 Mon Sep 17 00:00:00 2001
+From: Joaco2382 <104966815+Joaco2382@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 11:12:17 -0300
+Subject: [PATCH] fix: rest the pointer at the center when there's no mouse
+ input
+
+With --disable-mouse the input drivers report 0, 0, so scenes treated the
+pointer as sitting in the bottom left corner: camera parallax shifted the
+whole scene and left part of the screen empty (workshop 1982331270 showed a
+grey band and the wrong part of the image). The first frame also ran before
+the visible part of the scene was worked out (all UVs 0), so even with
+input the parallax started from a corner and took seconds to settle, which
+with a large parallaxDepth (50 in workshop 2069970082) left a band empty.
+
+The pointer now rests at the center of what's visible when mouse input is
+off, and at the center of the scene until the visible part is known.
+
+Tests: ScenePointer (3 cases).
+---
+ CMakeLists.txt                                |  5 ++-
+ .../Render/Wallpapers/CScene.cpp              | 29 ++++----------
+ .../Render/Wallpapers/ScenePointer.cpp        | 28 +++++++++++++
+ .../Render/Wallpapers/ScenePointer.h          | 25 ++++++++++++
+ .../Testing/Cases/ScenePointer.cpp            | 40 +++++++++++++++++++
+ 5 files changed, 105 insertions(+), 22 deletions(-)
+ create mode 100644 src/WallpaperEngine/Render/Wallpapers/ScenePointer.cpp
+ create mode 100644 src/WallpaperEngine/Render/Wallpapers/ScenePointer.h
+ create mode 100644 src/WallpaperEngine/Testing/Cases/ScenePointer.cpp
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b132448b..fac8d9bc 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -420,6 +420,8 @@ set(COMMON_SOURCES
+     src/WallpaperEngine/Render/Wallpapers/CScene.cpp
+     src/WallpaperEngine/Render/Wallpapers/AutoProjection.h
+     src/WallpaperEngine/Render/Wallpapers/AutoProjection.cpp
++    src/WallpaperEngine/Render/Wallpapers/ScenePointer.h
++    src/WallpaperEngine/Render/Wallpapers/ScenePointer.cpp
+     src/WallpaperEngine/Render/Wallpapers/CVideo.h
+     src/WallpaperEngine/Render/Wallpapers/CVideo.cpp
+     src/WallpaperEngine/Render/Wallpapers/CWeb.h
+@@ -578,7 +580,8 @@ if(BUILD_TESTING)
+         src/WallpaperEngine/Testing/Cases/UniformTypes.cpp
+         src/WallpaperEngine/Testing/Cases/ShaderVaryings.cpp
+         src/WallpaperEngine/Testing/Cases/HlslShapes.cpp
+-        src/WallpaperEngine/Testing/Cases/AutoProjection.cpp)
++        src/WallpaperEngine/Testing/Cases/AutoProjection.cpp
++        src/WallpaperEngine/Testing/Cases/ScenePointer.cpp)
+ endif()
+ 
+ add_library(
+diff --git a/src/WallpaperEngine/Render/Wallpapers/CScene.cpp b/src/WallpaperEngine/Render/Wallpapers/CScene.cpp
+index 4aaf6ac7..b6f091b7 100644
+--- a/src/WallpaperEngine/Render/Wallpapers/CScene.cpp
++++ b/src/WallpaperEngine/Render/Wallpapers/CScene.cpp
+@@ -6,6 +6,7 @@
+ #include "WallpaperEngine/Render/WallpaperState.h"
+ 
+ #include "AutoProjection.h"
++#include "ScenePointer.h"
+ #include "CScene.h"
+ #include "WallpaperEngine/Logging/Log.h"
+ 
+@@ -364,32 +365,18 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
+ }
+ 
+ void CScene::updateMouse (const glm::ivec4& viewport) {
+-    // update virtual mouse position first
+-    const glm::dvec2 position = this->getContext ().getInputContext ().getMouseInput ().position ();
+-
+     // rollover the position to the last
+     this->m_mousePositionLast = this->m_mousePosition;
+ 
+-    // calculate the current position of the mouse in viewport space [0, 1]
+-    double mouseX = glm::clamp ((position.x - viewport.x) / viewport.z, 0.0, 1.0);
+-    // Normalize Y coordinate (OpenGL convention: 0=bottom, 1=top)
+-    // Particle code expects this convention: 0=bottom results in negative Y (down), 1=top results in positive Y (up)
+-    double normalizedMouseY = glm::clamp ((position.y - viewport.y) / viewport.w, 0.0, 1.0);
+-
+-    // Account for UV cropping when using fill/fit scaling modes
+-    // The scene may be rendered larger than viewport and cropped via UVs
+     const auto uvs = this->getState ().getTextureUVs ();
++    const auto pointer = scenePointer (
++	this->getContext ().getApp ().getContext ().settings.mouse.enabled,
++	this->getContext ().getInputContext ().getMouseInput ().position (), viewport,
++	{ uvs.ustart, uvs.uend, uvs.vstart, uvs.vend }
++    );
+ 
+-    // Map mouse position from viewport space to scene UV space
+-    // UVs define what portion of the scene texture is visible
+-    this->m_mousePositionNormalized.x = uvs.ustart + mouseX * (uvs.uend - uvs.ustart);
+-    this->m_mousePositionNormalized.y = uvs.vstart + normalizedMouseY * (uvs.vend - uvs.vstart);
+-
+-    // Invert previous normalization of Y to match what the shader expects
+-    double mouseY = 1.0 - normalizedMouseY;
+-
+-    this->m_mousePosition.x = this->m_mousePositionNormalized.x;
+-    this->m_mousePosition.y = uvs.vstart + mouseY * (uvs.vend - uvs.vstart);
++    this->m_mousePositionNormalized = pointer.normalized;
++    this->m_mousePosition = pointer.position;
+ }
+ 
+ const Scene& CScene::getScene () const { return *this->getWallpaperData ().as<Scene> (); }
+diff --git a/src/WallpaperEngine/Render/Wallpapers/ScenePointer.cpp b/src/WallpaperEngine/Render/Wallpapers/ScenePointer.cpp
+new file mode 100644
+index 00000000..04d41bf2
+--- /dev/null
++++ b/src/WallpaperEngine/Render/Wallpapers/ScenePointer.cpp
+@@ -0,0 +1,28 @@
++#include "ScenePointer.h"
++
++#include <glm/common.hpp>
++
++using namespace WallpaperEngine::Render::Wallpapers;
++
++ScenePointer WallpaperEngine::Render::Wallpapers::scenePointer (
++    bool enabled, const glm::dvec2& position, const glm::ivec4& viewport, const glm::vec4& uvs
++) {
++    // viewport space [0, 1], y with OpenGL convention (0 = bottom)
++    double mouseX = 0.5;
++    double mouseY = 0.5;
++    if (enabled) {
++	mouseX = glm::clamp ((position.x - viewport.x) / viewport.z, 0.0, 1.0);
++	mouseY = glm::clamp ((position.y - viewport.y) / viewport.w, 0.0, 1.0);
++    }
++
++    // the scene may be rendered larger than the viewport and cropped through the UVs (fill and fit scaling). Before
++    // the first frame works them out they're all 0: the center of the scene is used meanwhile, otherwise the
++    // parallax starts from a corner and takes seconds to settle
++    if (uvs.x == uvs.y || uvs.z == uvs.w) {
++	return { .position = { 0.5f, 0.5f }, .normalized = { 0.5f, 0.5f } };
++    }
++
++    const float u = uvs.x + static_cast<float> (mouseX) * (uvs.y - uvs.x);
++    return { .position = { u, uvs.z + static_cast<float> (1.0 - mouseY) * (uvs.w - uvs.z) },
++	     .normalized = { u, uvs.z + static_cast<float> (mouseY) * (uvs.w - uvs.z) } };
++}
+diff --git a/src/WallpaperEngine/Render/Wallpapers/ScenePointer.h b/src/WallpaperEngine/Render/Wallpapers/ScenePointer.h
+new file mode 100644
+index 00000000..77b2db51
+--- /dev/null
++++ b/src/WallpaperEngine/Render/Wallpapers/ScenePointer.h
+@@ -0,0 +1,25 @@
++#pragma once
++
++#include <glm/vec2.hpp>
++#include <glm/vec4.hpp>
++
++namespace WallpaperEngine::Render::Wallpapers {
++struct ScenePointer {
++    /** Position for the shaders and the parallax, 0..1 with y pointing up */
++    glm::vec2 position;
++    /** Position in the scene's texture, 0..1 with y pointing down */
++    glm::vec2 normalized;
++};
++
++/**
++ * Where the pointer is over the visible part of the scene
++ *
++ * @param enabled Whether mouse input is on. Without it the pointer rests at the center of what's visible, so
++ * parallax and pointer effects stay neutral (the input drivers report 0, 0 then, a corner)
++ * @param position Pointer position in pixels
++ * @param viewport x, y, width and height of the output in pixels
++ * @param uvs Visible part of the scene: u start, u end, v start, v end (all 0 until the first frame works them out,
++ * then the center of the scene is used)
++ */
++ScenePointer scenePointer (bool enabled, const glm::dvec2& position, const glm::ivec4& viewport, const glm::vec4& uvs);
++} // namespace WallpaperEngine::Render::Wallpapers
+diff --git a/src/WallpaperEngine/Testing/Cases/ScenePointer.cpp b/src/WallpaperEngine/Testing/Cases/ScenePointer.cpp
+new file mode 100644
+index 00000000..2f2616dd
+--- /dev/null
++++ b/src/WallpaperEngine/Testing/Cases/ScenePointer.cpp
+@@ -0,0 +1,40 @@
++#include <catch2/catch_approx.hpp>
++#include <catch2/catch_test_macros.hpp>
++
++#include "WallpaperEngine/Render/Wallpapers/ScenePointer.h"
++
++using Catch::Approx;
++using namespace WallpaperEngine::Render::Wallpapers;
++
++// RipoWall runs scenes with --disable-mouse: the input drivers then report 0, 0 (a corner), which made parallax
++// scenes like workshop 1982331270 and 2069970082 shift as if the pointer sat in the bottom left corner
++TEST_CASE ("Without mouse input the pointer rests at the center of what's visible") {
++    const auto pointer = scenePointer (false, { 0.0, 0.0 }, { 0, 0, 1280, 720 }, { 0.0f, 1.0f, 0.0f, 1.0f });
++    CHECK (pointer.position.x == Approx (0.5f));
++    CHECK (pointer.position.y == Approx (0.5f));
++    CHECK (pointer.normalized.x == Approx (0.5f));
++    CHECK (pointer.normalized.y == Approx (0.5f));
++
++    // cropped by fill scaling: still the center of the visible part
++    const auto cropped = scenePointer (false, { 0.0, 0.0 }, { 0, 0, 1280, 720 }, { 0.1f, 0.9f, 0.2f, 0.6f });
++    CHECK (cropped.position.x == Approx (0.5f));
++    CHECK (cropped.position.y == Approx (0.4f));
++}
++
++TEST_CASE ("With mouse input the pointer follows it") {
++    // a quarter of the way right and up from the bottom left corner of the viewport
++    const auto pointer = scenePointer (true, { 320.0, 180.0 }, { 0, 0, 1280, 720 }, { 0.0f, 1.0f, 0.0f, 1.0f });
++    CHECK (pointer.position.x == Approx (0.25f));
++    CHECK (pointer.position.y == Approx (0.75f));
++    CHECK (pointer.normalized.y == Approx (0.25f));
++}
++
++// the first frame runs before the visible part is worked out: a pointer at 0, 0 made the parallax start from a corner
++// and, with parallaxDepth 50 (workshop 2069970082), leave a band of the scene empty for seconds
++TEST_CASE ("Before the visible part is known the pointer is at the center of the scene") {
++    for (const bool enabled : { false, true }) {
++	const auto pointer = scenePointer (enabled, { 0.0, 0.0 }, { 0, 0, 1280, 720 }, { 0.0f, 0.0f, 0.0f, 0.0f });
++	CHECK (pointer.position.x == Approx (0.5f));
++	CHECK (pointer.position.y == Approx (0.5f));
++    }
++}
+-- 
+2.56.0
+

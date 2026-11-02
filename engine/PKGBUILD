@@ -1,0 +1,70 @@
+# Motor de escenas de RipoWall: linux-wallpaperengine de upstream en un commit fijo, con los parches de
+# engine/patches/ (personajes "puppet", shaders, encuadre y efectos; ver engine/README.md).
+# Reemplaza a linux-wallpaperengine / linux-wallpaperengine-git mientras los parches no estén en upstream.
+# No se construye desde esta carpeta: engine/instalar-motor.sh copia este archivo y los parches a una carpeta
+# de trabajo (makepkg busca las fuentes locales junto al PKGBUILD) y corre makepkg ahí.
+pkgname=linux-wallpaperengine-ripowall
+_pkgname=linux-wallpaperengine
+_commit=38a5d60cf549fcead9a8880a4831b852ab95b92d
+pkgver=r640.38a5d60c
+pkgrel=2
+pkgdesc="linux-wallpaperengine con los arreglos de RipoWall (personajes puppet de Wallpaper Engine)"
+arch=('x86_64')
+url="https://github.com/Almamu/linux-wallpaperengine"
+license=('GPL-3.0-only')
+depends=('lz4' 'ffmpeg' 'mpv' 'glfw' 'glew' 'freeglut' 'libpulse' 'libcups' 'at-spi2-core' 'nss' 'libxcomposite' 'libxdamage' 'nspr')
+makedepends=('git' 'cmake' 'sdl2' 'glm' 'wayland-protocols' 'xorg-xrandr')
+provides=("linux-wallpaperengine=${pkgver}")
+conflicts=('linux-wallpaperengine' 'linux-wallpaperengine-git')
+source=("${_pkgname}::git+https://github.com/Almamu/linux-wallpaperengine.git#commit=${_commit}"
+        '0001-puppet-warp.patch'
+        '0002-uniform-types.patch'
+        '0003-narrow-fragment-varyings.patch'
+        '0004-glslang-hlsl-vector-truncation.patch'
+        '0005-fragment-varyings.patch'
+        '0006-auto-projection.patch'
+        '0007-pointer-at-rest.patch'
+        '0008-fill-fit-side.patch'
+        '0009-unique-framebuffers.patch')
+sha512sums=('SKIP'
+            '5fd67b971164094ff38dba589b7a410e0199e57cef90d910fee03628d6ed276fc8174f1c7bc960c1fb7310481927180f5e686f081473ce8106681915612d198f'
+            '98fde3e2a3b48c98acd49e88f54d94bbb2928490cdfb04085fe915ac46846435be931aa0247e33f5c3b26f0e32d734ecd318bf2e7b8fcf2ab2184f5dd70dd836'
+            '6f8861165cab37c09cfb2f491388027989705373a1dc1f472ebdddf9a360fa8267d78efda67962608f7e1a0d4ea6f460905ad03ecd3282bb3b0454bc70f8a9ee'
+            '2adc58ad37996046fd9fc66595b8ab7b7311d6f0a841a33f4f0b2fd4770a980b84685c20e7af3526433b6465e8edddbc6527403c45889d677eb84d2ffd900146'
+            '3eae931e4e2cf100dcc74a1617f924eeedb2a487075663a61a16f36dd66037531f06ab49b0fe67ce15821039a74774fa5d68488555b968272a23a370cdcb0382'
+            'ee9d75ce439ae57fb434dd1693b9a16d26bd831a52b474b433bc0d771f7aedddb28d7dbbb5f22dbc596a780242caa3762931888edf0efb945e64d5617671790e'
+            'b5dab52bc81b5a026f531be182e5ec8f907268639b5e56c40157e2b8cfb1d22134d0c23df5596147496446ba0f649d43aeae1d4e01850fcaae6b71bdcaf1ce5c'
+            '9039f914306099bb3e2dfc0d05d1f9086ca6a1a0937d34e9cf7666675fd496f0dfcf05cd7a3d081bc204ee96fd60cb31b6b9c88ab32cb82dff65eeaf3fa047ae'
+            '2eb5650957a11967535dd47b46d5b24d2a77ef497ae3a50bd0c4aa26012f08f9d168024b1ea528f6fa3bea3bdf095073a20770b76a8f331fb24e112091b0600b')
+
+prepare() {
+    cd "${_pkgname}"
+    git submodule update --init --recursive
+    # los parches van en orden y tienen que aplicarse completos (0004 cambia el submódulo de glslang, por eso
+    # se aplican después de bajar los submódulos)
+    for parche in "${srcdir}"/*.patch; do
+        git apply --verbose "${parche}"
+    done
+}
+
+build() {
+    cmake -B build -S "${_pkgname}" \
+        -DCMAKE_BUILD_TYPE='Release' \
+        -DCMAKE_INSTALL_PREFIX="/opt/${_pkgname}" \
+        -Wno-dev \
+        -DCMAKE_CXX_FLAGS="-ffat-lto-objects -Wno-builtin-macro-redefined" \
+        -DCMAKE_C_FLAGS="-Wno-builtin-macro-redefined"
+    cmake --build build
+}
+
+package() {
+    DESTDIR="${pkgdir}" cmake --install build
+    install -d -m755 "${pkgdir}/usr/bin"
+    cat > "${pkgdir}/usr/bin/${_pkgname}" << EOF
+#!/bin/bash
+export LD_LIBRARY_PATH="/opt/${_pkgname}/lib:\$LD_LIBRARY_PATH"
+cd /opt/${_pkgname}; exec ./${_pkgname} "\$@"
+EOF
+    chmod +x "${pkgdir}/usr/bin/${_pkgname}"
+    chmod +x "${pkgdir}/opt/${_pkgname}/linux-wallpaperengine"
+}

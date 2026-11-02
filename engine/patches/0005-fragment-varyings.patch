@@ -1,0 +1,323 @@
+From 7fcae69759225e666d5c984feb8bba95ae570a21 Mon Sep 17 00:00:00 2001
+From: Joaco2382 <104966815+Joaco2382@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 21:48:19 -0300
+Subject: [PATCH] fix: fragment varyings Wallpaper Engine shaders rely on
+
+Wallpaper Engine compiles its GLSL shaders with HLSL rules, where vertex
+outputs are one structure shared with the fragment stage and the fragment
+inputs are parameters it can modify. Workshop shaders depend on both:
+
+- a fragment shader can read a vertex varying it never declares
+  (foliagesway.frag reads v_Bounds, workshop 2169779628): the missing
+  declarations are added before main.
+- a fragment shader can write to an input ("v_RefractTexCoord.xy = ...",
+  workshop 2405891694): every varying it writes to gets a writable global
+  copy filled from the input at the start of main, and a macro of the same
+  name sends every use to the copy.
+
+Parameter metadata with numbers written with leading zeros
+("range":[0,01]) is also read now instead of losing the parameter's
+default value.
+
+Needs the glslang change that truncates mixed vector sizes in arithmetic
+(src/External/glslang-WallpaperEngine) for the HlslShapes tests.
+
+Tests: ShaderVaryings (3 more cases), HlslShapes (3 cases).
+---
+ CMakeLists.txt                                |   3 +-
+ .../Render/Shaders/ShaderUnit.cpp             | 102 +++++++++++++++++-
+ .../Render/Shaders/ShaderUnit.h               |  27 +++++
+ .../Testing/Cases/HlslShapes.cpp              |  47 ++++++++
+ .../Testing/Cases/ShaderVaryings.cpp          |  46 ++++++++
+ 5 files changed, 221 insertions(+), 4 deletions(-)
+ create mode 100644 src/WallpaperEngine/Testing/Cases/HlslShapes.cpp
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index fad1c5d2..1456eeba 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -574,7 +574,8 @@ if(BUILD_TESTING)
+         src/WallpaperEngine/Testing/Cases/PropertyParser.cpp
+         src/WallpaperEngine/Testing/Cases/PuppetParser.cpp
+         src/WallpaperEngine/Testing/Cases/UniformTypes.cpp
+-        src/WallpaperEngine/Testing/Cases/ShaderVaryings.cpp)
++        src/WallpaperEngine/Testing/Cases/ShaderVaryings.cpp
++        src/WallpaperEngine/Testing/Cases/HlslShapes.cpp)
+ endif()
+ 
+ add_library(
+diff --git a/src/WallpaperEngine/Render/Shaders/ShaderUnit.cpp b/src/WallpaperEngine/Render/Shaders/ShaderUnit.cpp
+index a634fc0f..ecf1e444 100644
+--- a/src/WallpaperEngine/Render/Shaders/ShaderUnit.cpp
++++ b/src/WallpaperEngine/Render/Shaders/ShaderUnit.cpp
+@@ -447,6 +447,96 @@ std::string ShaderUnit::narrowFragmentVaryings (std::string fragment, const std:
+     return result.empty () ? fragment : result + fragment.substr (copied);
+ }
+ 
++JSON ShaderUnit::parseLenientJson (const std::string& content) {
++    try {
++	return JSON::parse (content);
++    } catch (const std::exception&) {
++	// numbers written with leading zeros ("range":[0,01]) are fine for the editor but not valid JSON
++	static const std::regex leadingZeros (R"(([\[,:\s-])0+([0-9]))");
++	const std::string fixed = std::regex_replace (content, leadingZeros, "$1$2");
++	if (fixed == content) {
++	    throw;
++	}
++	return JSON::parse (fixed);
++    }
++}
++
++std::string ShaderUnit::declareMissingFragmentVaryings (std::string fragment, const std::string& vertex) {
++    static const std::regex declaration (R"(\bvarying\s+(float|vec2|vec3|vec4)\s+([A-Za-z_][A-Za-z0-9_]*)\s*;)");
++    static const std::regex mainStart (R"(\bvoid\s+main\s*\()");
++
++    std::smatch main;
++    if (!std::regex_search (fragment, main, mainStart)) {
++	return fragment;
++    }
++
++    std::string declarations;
++    for (auto it = std::sregex_iterator (vertex.begin (), vertex.end (), declaration); it != std::sregex_iterator ();
++	 ++it) {
++	const std::string name = (*it)[2].str ();
++	const std::regex used ("\\b" + name + "\\b");
++	const std::regex declared (R"(\bvarying\s+\w+\s+)" + name + "\\b");
++	if (std::regex_search (fragment, used) && !std::regex_search (fragment, declared)
++	    && declarations.find (" " + name + ";") == std::string::npos) {
++	    declarations += "varying " + (*it)[1].str () + " " + name + ";\n";
++	}
++    }
++
++    if (!declarations.empty ()) {
++	fragment.insert (main.position (), declarations);
++    }
++    return fragment;
++}
++
++std::string ShaderUnit::makeFragmentInputsWritable (std::string fragment) {
++    static const std::regex declaration (R"(\bvarying\s+(float|vec2|vec3|vec4)\s+([A-Za-z_][A-Za-z0-9_]*)\s*;)");
++    static const std::regex mainStart (R"(\bvoid\s+main\s*\(\s*(void)?\s*\)\s*\{)");
++
++    struct Input {
++	std::string type;
++	std::string name;
++	size_t end;
++    };
++    std::vector<Input> written;
++    for (auto it = std::sregex_iterator (fragment.begin (), fragment.end (), declaration);
++	 it != std::sregex_iterator (); ++it) {
++	const std::string name = (*it)[2].str ();
++	// an assignment (plain or compound, to the whole value or to some components) or an increment
++	const std::regex write (
++	    "\\b" + name + R"(\b(\s*\.\s*[xyzwrgba]+)?\s*(([-+*/]?=(?!=))|\+\+|--))" + "|" + R"((\+\+|--)\s*)" + name
++	    + "\\b"
++	);
++	if (std::regex_search (fragment.cbegin () + it->position () + it->length (), fragment.cend (), write)) {
++	    written.push_back ({ (*it)[1].str (), name, static_cast<size_t> (it->position () + it->length ()) });
++	}
++    }
++
++    std::smatch main;
++    if (written.empty () || !std::regex_search (fragment, main, mainStart)) {
++	return fragment;
++    }
++
++    // the copies are filled first thing in main, reading the real inputs
++    std::string initialization = "\n";
++    for (const auto& input : written) {
++	initialization += "#undef " + input.name + "\nripowall_writable_" + input.name + " = " + input.name
++	    + ";\n#define " + input.name + " ripowall_writable_" + input.name + "\n";
++    }
++    fragment.insert (main.position () + main.length (), initialization);
++
++    // declarations from the last one so the offsets stay valid
++    for (auto input = written.rbegin (); input != written.rend (); ++input) {
++	// the #undef also drops a truncating macro narrowFragmentVaryings may add for the same name
++	fragment.insert (
++	    input->end,
++	    "\n" + input->type + " ripowall_writable_" + input->name + ";\n#undef " + input->name + "\n#define "
++		+ input->name + " ripowall_writable_" + input->name + "\n"
++	);
++    }
++
++    return fragment;
++}
++
+ std::string ShaderUnit::applyFragmentTexCoordCompatibility (std::string source) const {
+     if (this->m_type != GLSLContext::UnitType_Fragment) {
+ 	return source;
+@@ -517,7 +607,7 @@ void ShaderUnit::parseParameterConfiguration (
+ ) {
+     JSON data;
+     try {
+-	data = JSON::parse (content);
++	data = parseLenientJson (content);
+     } catch (const std::exception& e) {
+ 	sLog.error ("Cannot parse parameter metadata for ", name, " in shader ", this->m_file, ": ", e.what ());
+ 	return;
+@@ -748,8 +838,14 @@ const std::string& ShaderUnit::compile () {
+ 
+     // this should be the rest of the shader
+     std::string body = this->applyLinkedVaryingCompatibility (this->m_preprocessed);
+-    if (this->m_type == GLSLContext::UnitType_Fragment && this->m_link != nullptr) {
+-	body = narrowFragmentVaryings (std::move (body), this->m_link->m_preprocessed);
++    if (this->m_type == GLSLContext::UnitType_Fragment) {
++	if (this->m_link != nullptr) {
++	    body = declareMissingFragmentVaryings (std::move (body), this->m_link->m_preprocessed);
++	}
++	body = makeFragmentInputsWritable (std::move (body));
++	if (this->m_link != nullptr) {
++	    body = narrowFragmentVaryings (std::move (body), this->m_link->m_preprocessed);
++	}
+     }
+     this->m_final += this->applyFragmentTexCoordCompatibility (std::move (body));
+ 
+diff --git a/src/WallpaperEngine/Render/Shaders/ShaderUnit.h b/src/WallpaperEngine/Render/Shaders/ShaderUnit.h
+index 19473dae..20ffe92d 100644
+--- a/src/WallpaperEngine/Render/Shaders/ShaderUnit.h
++++ b/src/WallpaperEngine/Render/Shaders/ShaderUnit.h
+@@ -120,6 +120,33 @@ public:
+      */
+     [[nodiscard]] static std::string narrowFragmentVaryings (std::string fragment, const std::string& vertex);
+ 
++    /**
++     * HLSL lets a shader modify its inputs (they're parameters of the entry point), GLSL doesn't. Every varying the
++     * fragment shader writes to gets a writable global copy, filled with the input at the start of main, and a
++     * macro of the same name sends every use to the copy
++     *
++     * @param fragment The fragment shader's source
++     *
++     * @return The fragment source with writable copies of the varyings it modifies
++     */
++    [[nodiscard]] static std::string makeFragmentInputsWritable (std::string fragment);
++
++    /**
++     * Wallpaper Engine shares every vertex output with the fragment shader, so a fragment shader can read a varying
++     * it never declares. Declares, before main, every vertex varying the fragment uses without declaring it
++     *
++     * @param fragment The fragment shader's source
++     * @param vertex The vertex shader's source
++     *
++     * @return The fragment source with the missing declarations
++     */
++    [[nodiscard]] static std::string declareMissingFragmentVaryings (std::string fragment, const std::string& vertex);
++
++    /**
++     * Parses the JSON metadata of a shader parameter, also accepting numbers written with leading zeros
++     */
++    [[nodiscard]] static JSON parseLenientJson (const std::string& content);
++
+ private:
+     /**
+      * Parses a COMBO value to add the proper define to the code
+diff --git a/src/WallpaperEngine/Testing/Cases/HlslShapes.cpp b/src/WallpaperEngine/Testing/Cases/HlslShapes.cpp
+new file mode 100644
+index 00000000..0cf451b9
+--- /dev/null
++++ b/src/WallpaperEngine/Testing/Cases/HlslShapes.cpp
+@@ -0,0 +1,47 @@
++#include <catch2/catch_test_macros.hpp>
++
++#include "WallpaperEngine/Render/Shaders/GLSLContext.h"
++
++using WallpaperEngine::Render::Shaders::GLSLContext;
++
++namespace {
++const std::string vertex = "#version 330\n"
++			   "in vec3 a_Position;\n"
++			   "out vec2 v_Scroll;\n"
++			   "void main () { v_Scroll = a_Position.xy; gl_Position = vec4 (a_Position, 1.0); }\n";
++}
++
++// Wallpaper Engine compiles its GLSL shaders with HLSL rules: mixing vector sizes truncates the larger one
++TEST_CASE ("Vectors of different sizes in arithmetic are truncated to the smaller one") {
++    const std::string fragment = "#version 330\n"
++				 "in vec2 v_Scroll;\n"
++				 "out vec4 color;\n"
++				 "void main () { vec3 refract = vec3 (1.0); vec2 sum = (refract + v_Scroll) * 2.0;"
++				 " color = vec4 (sum, 0.0, 1.0); }\n";
++
++    const auto [vertexGlsl, fragmentGlsl] = GLSLContext::get ().toGlsl (vertex, fragment);
++    REQUIRE_FALSE (fragmentGlsl.empty ());
++}
++
++// already handled by the glslang fork before the arithmetic case, kept as a regression check
++TEST_CASE ("A wider vector assigned to a narrower one is truncated") {
++    const std::string fragment = "#version 330\n"
++				 "in vec2 v_Scroll;\n"
++				 "out vec4 color;\n"
++				 "void main () { vec2 position = vec4 (v_Scroll, 0.0, 1.0); position += vec3 (1.0);"
++				 " color = vec4 (position, 0.0, 1.0); }\n";
++
++    const auto [vertexGlsl, fragmentGlsl] = GLSLContext::get ().toGlsl (vertex, fragment);
++    REQUIRE_FALSE (fragmentGlsl.empty ());
++}
++
++TEST_CASE ("Valid GLSL still rejects what HLSL rejects too") {
++    // a narrower vector can't become a wider one in either language
++    const std::string fragment = "#version 330\n"
++				 "in vec2 v_Scroll;\n"
++				 "out vec4 color;\n"
++				 "void main () { vec4 wide = v_Scroll; color = wide; }\n";
++
++    const auto [vertexGlsl, fragmentGlsl] = GLSLContext::get ().toGlsl (vertex, fragment);
++    CHECK (fragmentGlsl.empty ());
++}
+diff --git a/src/WallpaperEngine/Testing/Cases/ShaderVaryings.cpp b/src/WallpaperEngine/Testing/Cases/ShaderVaryings.cpp
+index 1e0aad3c..bcc596ef 100644
+--- a/src/WallpaperEngine/Testing/Cases/ShaderVaryings.cpp
++++ b/src/WallpaperEngine/Testing/Cases/ShaderVaryings.cpp
+@@ -37,3 +37,49 @@ TEST_CASE ("Without anything to change the fragment comes back as it was") {
+     const std::string fragment = "uniform vec4 g_Color;\nvoid main () {}\n";
+     CHECK (ShaderUnit::narrowFragmentVaryings (fragment, "varying vec4 v_TexCoord;\n") == fragment);
+ }
++
++// workshop 2405891694: "v_RefractTexCoord.xy = frac((v_RefractTexCoord + v_Scroll) * g_Scale);" writes to a vec3
++// input and adds a vec3 and a vec2, both valid with the HLSL rules Wallpaper Engine compiles with
++TEST_CASE ("Varyings the fragment shader writes to get a writable copy filled from the input") {
++    const std::string fragment
++	= "varying vec3 v_Refract;\nvarying vec2 v_Scroll;\n"
++	  "void main() {\n\tv_Refract.xy = v_Refract.xy + v_Scroll;\n\tgl_FragColor = vec4 (v_Refract, 1.0);\n}\n";
++
++    const std::string result = ShaderUnit::makeFragmentInputsWritable (fragment);
++
++    CHECK (result.find ("vec3 ripowall_writable_v_Refract;") != std::string::npos);
++    CHECK (result.find ("ripowall_writable_v_Refract = v_Refract;") != std::string::npos);
++    CHECK (result.find ("#define v_Refract ripowall_writable_v_Refract") != std::string::npos);
++    // a varying that is only read keeps being the input
++    CHECK (result.find ("ripowall_writable_v_Scroll") == std::string::npos);
++    // the copy is filled at the start of main, before the body runs
++    CHECK (result.find ("ripowall_writable_v_Refract = v_Refract;") < result.find ("v_Refract.xy = v_Refract.xy"));
++    // comparisons are not writes
++    CHECK (
++	ShaderUnit::makeFragmentInputsWritable (
++	    "varying float v_A;\nvoid main() { if (v_A == 1.0 || v_A >= 2.0) {} }\n"
++	)
++	    .find ("ripowall_writable")
++	== std::string::npos
++    );
++}
++
++// workshop 2169779628: foliagesway.frag reads v_Bounds, which only foliagesway.vert declares
++TEST_CASE ("Vertex varyings the fragment reads without declaring them are declared") {
++    const std::string vertex = "varying vec4 v_TexCoord;\nvarying vec2 v_Bounds;\nvarying vec3 v_Unused;\n";
++    const std::string fragment = "varying vec4 v_TexCoord;\nvoid main() { float x = v_Bounds.x; }\n";
++
++    const std::string result = ShaderUnit::declareMissingFragmentVaryings (fragment, vertex);
++
++    CHECK (result.find ("varying vec2 v_Bounds;\nvoid main()") != std::string::npos);
++    CHECK (result.find ("v_Unused") == std::string::npos);
++    // already declared: not declared twice
++    CHECK (result.find ("varying vec4 v_TexCoord;") == result.rfind ("varying vec4 v_TexCoord;"));
++}
++
++TEST_CASE ("Parameter metadata with leading zeros in numbers is still read") {
++    const auto data = ShaderUnit::parseLenientJson (R"({"material":"Speed","default":1,"range":[0,01]})");
++    CHECK (data["default"].get<int> () == 1);
++    CHECK (data["range"][1].get<int> () == 1);
++    CHECK_THROWS (ShaderUnit::parseLenientJson ("{not json"));
++}
+-- 
+2.56.0
+

@@ -1,0 +1,353 @@
+From fcef95853390e682c2a3928791e83fc481ae2bdb Mon Sep 17 00:00:00 2001
+From: Joaco2382 <104966815+Joaco2382@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 21:34:36 -0300
+Subject: [PATCH] fix: send uniforms with the type the linked program uses
+
+The uniform parser doesn't evaluate #if blocks, so a name declared with one
+type in an inactive branch of one stage and with another type in the other
+stage was registered with the first type found. clouds.vert declares
+"vec2 g_CloudSpeeds" under PERSPECTIVE == 0 and clouds.frag "vec4
+g_CloudSpeeds" under the #else: with PERSPECTIVE = 1 the engine called
+glUniform2fv on a vec4 every frame (GL_INVALID_OPERATION).
+
+- After linking, the type of every active uniform is read with
+  glGetActiveUniform. When both stages declare a name with different types,
+  the declaration that matches the program is used (also for its default
+  value), and values are always sent with the program's type.
+- An OpenGL error left behind by earlier calls no longer makes --screenshot
+  fail: pending errors are logged and cleared before reading the pixels.
+  That stale error is why workshop 2228173242 captured as a black image.
+
+Tests: UniformTypes (3 cases) with the clouds declarations.
+---
+ CMakeLists.txt                                |  5 +-
+ .../Application/WallpaperApplication.cpp      |  5 ++
+ .../Render/Objects/Effects/CPass.cpp          | 76 +++++++++++++++++--
+ .../Render/Objects/Effects/CPass.h            |  5 ++
+ .../Render/Shaders/UniformTypes.cpp           | 43 +++++++++++
+ .../Render/Shaders/UniformTypes.h             | 30 ++++++++
+ .../Testing/Cases/UniformTypes.cpp            | 40 ++++++++++
+ 7 files changed, 198 insertions(+), 6 deletions(-)
+ create mode 100644 src/WallpaperEngine/Render/Shaders/UniformTypes.cpp
+ create mode 100644 src/WallpaperEngine/Render/Shaders/UniformTypes.h
+ create mode 100644 src/WallpaperEngine/Testing/Cases/UniformTypes.cpp
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 2b23eb05..6249e7ad 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -375,6 +375,8 @@ set(COMMON_SOURCES
+     src/WallpaperEngine/Render/Shaders/Shader.h
+     src/WallpaperEngine/Render/Shaders/Shader.cpp
+     src/WallpaperEngine/Render/Shaders/ShaderUnit.cpp
++    src/WallpaperEngine/Render/Shaders/UniformTypes.h
++    src/WallpaperEngine/Render/Shaders/UniformTypes.cpp
+     src/WallpaperEngine/Render/Shaders/ShaderUnit.h
+     src/WallpaperEngine/Render/Shaders/GLSLContext.cpp
+     src/WallpaperEngine/Render/Shaders/GLSLContext.h
+@@ -570,7 +572,8 @@ if(BUILD_TESTING)
+         src/WallpaperEngine/Testing/Harnesses/RenderHarness.h
+         src/WallpaperEngine/Testing/Cases/MouseCoordinates.cpp
+         src/WallpaperEngine/Testing/Cases/PropertyParser.cpp
+-        src/WallpaperEngine/Testing/Cases/PuppetParser.cpp)
++        src/WallpaperEngine/Testing/Cases/PuppetParser.cpp
++        src/WallpaperEngine/Testing/Cases/UniformTypes.cpp)
+ endif()
+ 
+ add_library(
+diff --git a/src/WallpaperEngine/Application/WallpaperApplication.cpp b/src/WallpaperEngine/Application/WallpaperApplication.cpp
+index c9107afc..9293345b 100644
+--- a/src/WallpaperEngine/Application/WallpaperApplication.cpp
++++ b/src/WallpaperEngine/Application/WallpaperApplication.cpp
+@@ -573,6 +573,11 @@ void WallpaperApplication::takeScreenshot (const std::filesystem::path& filename
+ 	const int vpWidth = viewport->viewport.z - viewport->viewport.x;
+ 	const int vpHeight = viewport->viewport.w - viewport->viewport.y;
+ 
++	// an error left behind by an earlier call would make the check after reading fail the whole capture
++	for (GLenum pending = glGetError (); pending != GL_NO_ERROR; pending = glGetError ()) {
++	    sLog.error ("OpenGL error ", pending, " left behind before taking the screenshot of ", screen);
++	}
++
+ 	// bind the wallpaper's FBO to read from it directly
+ 	// this is more reliable than the default framebuffer on some drivers (NVIDIA/Wayland)
+ 	glBindFramebuffer (GL_FRAMEBUFFER, wallpaper->getWallpaperFramebuffer ());
+diff --git a/src/WallpaperEngine/Render/Objects/Effects/CPass.cpp b/src/WallpaperEngine/Render/Objects/Effects/CPass.cpp
+index e93c2937..538a2352 100644
+--- a/src/WallpaperEngine/Render/Objects/Effects/CPass.cpp
++++ b/src/WallpaperEngine/Render/Objects/Effects/CPass.cpp
+@@ -1,4 +1,5 @@
+ #include "CPass.h"
++#include "WallpaperEngine/Render/Shaders/UniformTypes.h"
+ #include <sstream>
+ #include <utility>
+ 
+@@ -645,6 +646,10 @@ void CPass::setupShaders () {
+     glGetProgramiv (this->m_programID, GL_LINK_STATUS, &result);
+     glGetProgramiv (this->m_programID, GL_INFO_LOG_LENGTH, &infoLogLength);
+ 
++    if (result == GL_TRUE) {
++	this->collectActiveUniformTypes ();
++    }
++
+     if (infoLogLength > 0) {
+ 	const auto logBuffer = new char[infoLogLength + 1];
+ 	// ensure logBuffer ends with a \0
+@@ -962,10 +967,48 @@ template <typename T> void CPass::addUniform (const std::string& name, UniformTy
+     );
+ }
+ 
++void CPass::collectActiveUniformTypes () {
++    this->m_activeUniformTypes.clear ();
++
++    GLint count = 0;
++    GLint maxLength = 0;
++    glGetProgramiv (this->m_programID, GL_ACTIVE_UNIFORMS, &count);
++    glGetProgramiv (this->m_programID, GL_ACTIVE_UNIFORM_MAX_LENGTH, &maxLength);
++    std::vector<char> name (static_cast<size_t> (std::max (maxLength, 1)) + 1, '\0');
++
++    for (GLint index = 0; index < count; index++) {
++	GLint size = 0;
++	GLenum type = GL_NONE;
++	GLsizei length = 0;
++	glGetActiveUniform (
++	    this->m_programID, static_cast<GLuint> (index), static_cast<GLsizei> (name.size ()), &length, &size, &type,
++	    name.data ()
++	);
++	std::string uniformName (name.data (), static_cast<size_t> (length));
++	// arrays are reported as "name[0]"
++	if (const auto bracket = uniformName.find ('['); bracket != std::string::npos) {
++	    uniformName.resize (bracket);
++	}
++	this->m_activeUniformTypes.insert_or_assign (uniformName, type);
++    }
++}
++
++const ShaderVariable* CPass::pickParameter (const ShaderVariable* vertex, const ShaderVariable* fragment) const {
++    return Shaders::pickDeclaration (vertex, fragment, this->m_activeUniformTypes);
++}
++
+ void CPass::setupShaderVariables () {
+     for (const auto& cur : this->m_shader->getVertex ().getParameters ()) {
+ 	if (!this->m_uniforms.contains (cur->getName ())) {
+-	    this->addUniform (cur);
++	    const ShaderVariable* fragment = nullptr;
++	    for (const auto& candidate : this->m_shader->getFragment ().getParameters ()) {
++		if (candidate->getName () == cur->getName ()) {
++		    fragment = candidate;
++		    break;
++		}
++	    }
++	    const ShaderVariable* variable = this->pickParameter (cur, fragment);
++	    this->addUniform (variable, variable);
+ 	}
+     }
+ 
+@@ -983,8 +1026,7 @@ void CPass::setupShaderVariables () {
+ 	    continue;
+ 	}
+ 
+-	ShaderVariable* var = vertex == nullptr ? fragment : vertex;
+-	this->addUniform (var, value->value.get ());
++	this->addUniform (this->pickParameter (vertex, fragment), value->value.get ());
+     }
+ 
+     // apply override constants (highest priority, overrides both defaults and pass constants)
+@@ -995,8 +1037,7 @@ void CPass::setupShaderVariables () {
+ 	    continue;
+ 	}
+ 
+-	ShaderVariable* var = vertex == nullptr ? fragment : vertex;
+-	this->addUniform (var, value->value.get ());
++	this->addUniform (this->pickParameter (vertex, fragment), value->value.get ());
+     }
+ }
+ 
+@@ -1008,6 +1049,31 @@ void CPass::addUniform (ShaderVariable* value) {
+ }
+ 
+ void CPass::addUniform (const ShaderVariable* value, const DynamicValue* setting) {
++    // the type the linked program uses decides how the value is sent (a mismatched glUniform call is an error)
++    if (const auto active = this->m_activeUniformTypes.find (value->getName ());
++	active != this->m_activeUniformTypes.end ()) {
++	switch (active->second) {
++	    case GL_FLOAT:
++		this->addUniform (value->getName (), &setting->getFloat ());
++		return;
++	    case GL_INT:
++	    case GL_BOOL:
++		this->addUniform (value->getName (), &setting->getInt ());
++		return;
++	    case GL_FLOAT_VEC2:
++		this->addUniform (value->getName (), &setting->getVec2 ());
++		return;
++	    case GL_FLOAT_VEC3:
++		this->addUniform (value->getName (), &setting->getVec3 ());
++		return;
++	    case GL_FLOAT_VEC4:
++		this->addUniform (value->getName (), &setting->getVec4 ());
++		return;
++	    default:
++		break;
++	}
++    }
++
+     if (value->is<ShaderVariableFloat> ()) {
+ 	this->addUniform (value->getName (), &setting->getFloat ());
+     } else if (value->is<ShaderVariableInteger> ()) {
+diff --git a/src/WallpaperEngine/Render/Objects/Effects/CPass.h b/src/WallpaperEngine/Render/Objects/Effects/CPass.h
+index 4c3ab16b..32ac3762 100644
+--- a/src/WallpaperEngine/Render/Objects/Effects/CPass.h
++++ b/src/WallpaperEngine/Render/Objects/Effects/CPass.h
+@@ -125,6 +125,9 @@ private:
+     static GLuint compileShader (const char* shader, GLuint type);
+     void setupShaders ();
+     void setupShaderVariables ();
++    void collectActiveUniformTypes ();
++    [[nodiscard]] const ShaderVariable*
++    pickParameter (const ShaderVariable* vertex, const ShaderVariable* fragment) const;
+     void setupUniforms ();
+     void setupTextureUniforms ();
+     void setupAttributes ();
+@@ -183,6 +186,8 @@ private:
+     std::map<std::string, int> m_combos = {};
+     std::vector<AttribEntry*> m_attribs = {};
+     std::map<std::string, UniformEntry*> m_uniforms = {};
++    /** Type of every active uniform in the linked program, as OpenGL reports it */
++    std::map<std::string, GLenum> m_activeUniformTypes = {};
+     std::map<std::string, ReferenceUniformEntry*> m_referenceUniforms = {};
+     BlendingMode m_blendingmode = BlendingMode_Normal;
+     const glm::mat4* m_modelViewProjectionMatrix;
+diff --git a/src/WallpaperEngine/Render/Shaders/UniformTypes.cpp b/src/WallpaperEngine/Render/Shaders/UniformTypes.cpp
+new file mode 100644
+index 00000000..2abb41a0
+--- /dev/null
++++ b/src/WallpaperEngine/Render/Shaders/UniformTypes.cpp
+@@ -0,0 +1,43 @@
++#include "UniformTypes.h"
++
++#include "WallpaperEngine/Render/Shaders/Variables/ShaderVariableFloat.h"
++#include "WallpaperEngine/Render/Shaders/Variables/ShaderVariableInteger.h"
++#include "WallpaperEngine/Render/Shaders/Variables/ShaderVariableVector2.h"
++#include "WallpaperEngine/Render/Shaders/Variables/ShaderVariableVector3.h"
++#include "WallpaperEngine/Render/Shaders/Variables/ShaderVariableVector4.h"
++
++using namespace WallpaperEngine::Render::Shaders;
++using namespace WallpaperEngine::Render::Shaders::Variables;
++
++bool WallpaperEngine::Render::Shaders::matchesUniformType (const ShaderVariable& variable, GLenum type) {
++    switch (type) {
++	case GL_FLOAT:
++	    return variable.is<ShaderVariableFloat> ();
++	case GL_INT:
++	case GL_BOOL:
++	    return variable.is<ShaderVariableInteger> ();
++	case GL_FLOAT_VEC2:
++	    return variable.is<ShaderVariableVector2> ();
++	case GL_FLOAT_VEC3:
++	    return variable.is<ShaderVariableVector3> ();
++	case GL_FLOAT_VEC4:
++	    return variable.is<ShaderVariableVector4> ();
++	default:
++	    return false;
++    }
++}
++
++const ShaderVariable* WallpaperEngine::Render::Shaders::pickDeclaration (
++    const ShaderVariable* vertex, const ShaderVariable* fragment, const ActiveUniformTypes& activeTypes
++) {
++    if (vertex == nullptr || fragment == nullptr) {
++	return vertex != nullptr ? vertex : fragment;
++    }
++
++    const auto type = activeTypes.find (vertex->getName ());
++    if (type != activeTypes.end () && !matchesUniformType (*vertex, type->second)
++	&& matchesUniformType (*fragment, type->second)) {
++	return fragment;
++    }
++    return vertex;
++}
+diff --git a/src/WallpaperEngine/Render/Shaders/UniformTypes.h b/src/WallpaperEngine/Render/Shaders/UniformTypes.h
+new file mode 100644
+index 00000000..64ddc562
+--- /dev/null
++++ b/src/WallpaperEngine/Render/Shaders/UniformTypes.h
+@@ -0,0 +1,30 @@
++#pragma once
++
++#include <map>
++#include <string>
++
++#include <GL/glew.h>
++
++#include "WallpaperEngine/Render/Shaders/Variables/ShaderVariable.h"
++
++namespace WallpaperEngine::Render::Shaders {
++/**
++ * Type of every active uniform of a linked program, as OpenGL reports it (glGetActiveUniform)
++ */
++using ActiveUniformTypes = std::map<std::string, GLenum>;
++
++/**
++ * @return Whether a uniform declaration parsed from the shader source has the type the linked program uses
++ */
++bool matchesUniformType (const Variables::ShaderVariable& variable, GLenum type);
++
++/**
++ * The uniform parser doesn't evaluate #if blocks, so the same name can be declared with one type in an inactive
++ * branch of one stage and with another type in the other stage. Picks the declaration that matches the linked
++ * program, the vertex one when both (or none) match
++ */
++const Variables::ShaderVariable* pickDeclaration (
++    const Variables::ShaderVariable* vertex, const Variables::ShaderVariable* fragment,
++    const ActiveUniformTypes& activeTypes
++);
++} // namespace WallpaperEngine::Render::Shaders
+diff --git a/src/WallpaperEngine/Testing/Cases/UniformTypes.cpp b/src/WallpaperEngine/Testing/Cases/UniformTypes.cpp
+new file mode 100644
+index 00000000..421896b4
+--- /dev/null
++++ b/src/WallpaperEngine/Testing/Cases/UniformTypes.cpp
+@@ -0,0 +1,40 @@
++#include <catch2/catch_test_macros.hpp>
++
++#include "WallpaperEngine/Render/Shaders/UniformTypes.h"
++#include "WallpaperEngine/Render/Shaders/Variables/ShaderVariableFloat.h"
++#include "WallpaperEngine/Render/Shaders/Variables/ShaderVariableVector2.h"
++#include "WallpaperEngine/Render/Shaders/Variables/ShaderVariableVector4.h"
++
++using namespace WallpaperEngine::Render::Shaders;
++using namespace WallpaperEngine::Render::Shaders::Variables;
++
++// clouds.vert declares "uniform vec2 g_CloudSpeeds" inside #if PERSPECTIVE == 0 and clouds.frag declares
++// "uniform vec4 g_CloudSpeeds" inside #else: with PERSPECTIVE = 1 only the vec4 one exists in the program
++TEST_CASE ("The declaration that matches the linked program wins over an inactive one") {
++    const ShaderVariableVector2 vertex ({ 0.01f, -0.02f }, "g_CloudSpeeds");
++    const ShaderVariableVector4 fragment ({ 0.01f, 0.01f, -0.02f, -0.02f }, "g_CloudSpeeds");
++
++    CHECK (pickDeclaration (&vertex, &fragment, { { "g_CloudSpeeds", GL_FLOAT_VEC4 } }) == &fragment);
++    CHECK (pickDeclaration (&vertex, &fragment, { { "g_CloudSpeeds", GL_FLOAT_VEC2 } }) == &vertex);
++}
++
++TEST_CASE ("Without a conflict the declaration found is used") {
++    const ShaderVariableFloat vertex (1.0f, "g_Speed");
++    const ShaderVariableFloat fragment (2.0f, "g_Speed");
++
++    CHECK (pickDeclaration (&vertex, nullptr, { { "g_Speed", GL_FLOAT_VEC4 } }) == &vertex);
++    CHECK (pickDeclaration (nullptr, &fragment, {}) == &fragment);
++    // both match (or the program doesn't use it): the vertex one, as before
++    CHECK (pickDeclaration (&vertex, &fragment, { { "g_Speed", GL_FLOAT } }) == &vertex);
++    CHECK (pickDeclaration (&vertex, &fragment, {}) == &vertex);
++}
++
++TEST_CASE ("Uniform types are matched by their OpenGL type") {
++    const ShaderVariableVector2 vector2 ({ 0.0f, 0.0f }, "a");
++    const ShaderVariableFloat number (0.0f, "b");
++
++    CHECK (matchesUniformType (vector2, GL_FLOAT_VEC2));
++    CHECK_FALSE (matchesUniformType (vector2, GL_FLOAT_VEC4));
++    CHECK (matchesUniformType (number, GL_FLOAT));
++    CHECK_FALSE (matchesUniformType (number, GL_INT));
++}
+-- 
+2.56.0
+

@@ -119,6 +119,19 @@ install_hidamari() {
     esac
 }
 
+# ── Motor de escenas (linux-wallpaperengine con los parches de RipoWall) ─
+
+install_motor() {
+    echo -e "\n${YELLOW}Instalando el motor de escenas (linux-wallpaperengine + parches de RipoWall)...${RESET}"
+    if "${SCRIPT_DIR}/engine/instalar-motor.sh"; then
+        echo -e "  ${GREEN}✓${RESET} motor de escenas listo"
+    else
+        echo -e "  ${RED}✗${RESET} no se pudo instalar el motor: las escenas de Wallpaper Engine no se van a ver."
+        echo -e "      Revisar el error de arriba y correr: ${BOLD}engine/instalar-motor.sh${RESET}"
+        return 1
+    fi
+}
+
 # ── Instalar scripts de RipoWall ────────────────────────────────────────
 
 install_ripowall() {
@@ -215,12 +228,17 @@ echo -e "${BOLD}Opciones:${RESET}"
 echo "  [1] Instalacion completa (dependencias + Hidamari + RipoWall)"
 echo "  [2] Solo RipoWall (ya tenes Hidamari y dependencias)"
 echo "  [3] Solo actualizar RipoWall scripts"
-read -rp "Elegi [1-3]: " choice
+echo "  [4] Solo el motor de escenas (linux-wallpaperengine con los parches de RipoWall)"
+read -rp "Elegi [1-4]: " choice
 
 case "$choice" in
     1)
         install_deps
         install_hidamari
+        # sin motor RipoWall igual sirve para videos y fondos web: la instalación completa sigue
+        if ! install_motor; then
+            echo -e "  ${YELLOW}!${RESET} se sigue con la instalación sin el motor de escenas"
+        fi
         install_ripowall
         enable_daemon
         ;;
@@ -230,6 +248,9 @@ case "$choice" in
         ;;
     3)
         install_ripowall
+        ;;
+    4)
+        install_motor
         ;;
     *)
         echo -e "${RED}Opcion invalida${RESET}"

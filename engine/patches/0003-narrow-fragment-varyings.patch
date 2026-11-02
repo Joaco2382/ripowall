@@ -1,0 +1,183 @@
+From 698f2660a330656577db3e70d7d13094a77ae4b7 Mon Sep 17 00:00:00 2001
+From: Joaco2382 <104966815+Joaco2382@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 21:38:40 -0300
+Subject: [PATCH] fix: truncate fragment varyings narrower than their vertex
+ output
+
+Wallpaper Engine compiles shaders with HLSL rules, where a vertex output
+wider than the fragment input it feeds is truncated. When the vertex
+declares "varying vec4 v_TexCoord" and the fragment "varying vec2
+v_TexCoord", glslang's link step widened the fragment symbol to vec4 after
+its expressions were already checked as vec2, which produced GLSL like
+"vec2 fragPos = v_TexCoord;" with a vec4 v_TexCoord that the driver rejects
+(workshop 2403480896 drew nothing).
+
+Such fragment varyings are now declared with the vertex type and a macro of
+the same name truncates them where they're used ("#define v_TexCoord
+v_TexCoord.xy"; the preprocessor doesn't expand a macro inside itself, so
+the declaration is left alone). The opposite case (fragment wider than the
+vertex) keeps using the existing vertex side promotion.
+
+Tests: ShaderVaryings (3 cases).
+---
+ CMakeLists.txt                                |  3 +-
+ .../Render/Shaders/ShaderUnit.cpp             | 40 ++++++++++++++++++-
+ .../Render/Shaders/ShaderUnit.h               | 16 ++++++++
+ .../Testing/Cases/ShaderVaryings.cpp          | 39 ++++++++++++++++++
+ 4 files changed, 95 insertions(+), 3 deletions(-)
+ create mode 100644 src/WallpaperEngine/Testing/Cases/ShaderVaryings.cpp
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 6249e7ad..fad1c5d2 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -573,7 +573,8 @@ if(BUILD_TESTING)
+         src/WallpaperEngine/Testing/Cases/MouseCoordinates.cpp
+         src/WallpaperEngine/Testing/Cases/PropertyParser.cpp
+         src/WallpaperEngine/Testing/Cases/PuppetParser.cpp
+-        src/WallpaperEngine/Testing/Cases/UniformTypes.cpp)
++        src/WallpaperEngine/Testing/Cases/UniformTypes.cpp
++        src/WallpaperEngine/Testing/Cases/ShaderVaryings.cpp)
+ endif()
+ 
+ add_library(
+diff --git a/src/WallpaperEngine/Render/Shaders/ShaderUnit.cpp b/src/WallpaperEngine/Render/Shaders/ShaderUnit.cpp
+index fcc03fcd..a634fc0f 100644
+--- a/src/WallpaperEngine/Render/Shaders/ShaderUnit.cpp
++++ b/src/WallpaperEngine/Render/Shaders/ShaderUnit.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include "WallpaperEngine/Logging/Log.h"
+ #include <exception>
++#include <map>
+ #include <regex>
+ #include <stack>
+ #include <string>
+@@ -414,6 +415,38 @@ std::string ShaderUnit::applyLinkedVaryingCompatibility (std::string source) con
+     return source;
+ }
+ 
++std::string ShaderUnit::narrowFragmentVaryings (std::string fragment, const std::string& vertex) {
++    static const std::regex declaration (R"(\bvarying\s+(float|vec2|vec3|vec4)\s+([A-Za-z_][A-Za-z0-9_]*)\s*;)");
++    const auto components = [] (const std::string& type) -> int { return type == "float" ? 1 : type[3] - '0'; };
++
++    // the vertex outputs, by name
++    std::map<std::string, std::string> outputs;
++    for (auto it = std::sregex_iterator (vertex.begin (), vertex.end (), declaration); it != std::sregex_iterator ();
++	 ++it) {
++	outputs.emplace ((*it)[2].str (), (*it)[1].str ());
++    }
++
++    std::string result;
++    size_t copied = 0;
++    for (auto it = std::sregex_iterator (fragment.begin (), fragment.end (), declaration);
++	 it != std::sregex_iterator (); ++it) {
++	const std::string type = (*it)[1].str ();
++	const std::string name = (*it)[2].str ();
++	const auto output = outputs.find (name);
++	if (output == outputs.end () || components (output->second) <= components (type)) {
++	    continue;
++	}
++
++	static constexpr const char* swizzles[] = { "", ".x", ".xy", ".xyz" };
++	result += fragment.substr (copied, it->position () - copied);
++	result += "varying " + output->second + " " + name + ";\n#define " + name + " " + name
++	    + swizzles[components (type)];
++	copied = it->position () + it->length ();
++    }
++
++    return result.empty () ? fragment : result + fragment.substr (copied);
++}
++
+ std::string ShaderUnit::applyFragmentTexCoordCompatibility (std::string source) const {
+     if (this->m_type != GLSLContext::UnitType_Fragment) {
+ 	return source;
+@@ -714,8 +747,11 @@ const std::string& ShaderUnit::compile () {
+     }
+ 
+     // this should be the rest of the shader
+-    this->m_final
+-	+= this->applyFragmentTexCoordCompatibility (this->applyLinkedVaryingCompatibility (this->m_preprocessed));
++    std::string body = this->applyLinkedVaryingCompatibility (this->m_preprocessed);
++    if (this->m_type == GLSLContext::UnitType_Fragment && this->m_link != nullptr) {
++	body = narrowFragmentVaryings (std::move (body), this->m_link->m_preprocessed);
++    }
++    this->m_final += this->applyFragmentTexCoordCompatibility (std::move (body));
+ 
+     // the pass itself handles shader compilation, the unit doesn't have enough information for this step
+     return this->m_final;
+diff --git a/src/WallpaperEngine/Render/Shaders/ShaderUnit.h b/src/WallpaperEngine/Render/Shaders/ShaderUnit.h
+index 0a5d5d64..19473dae 100644
+--- a/src/WallpaperEngine/Render/Shaders/ShaderUnit.h
++++ b/src/WallpaperEngine/Render/Shaders/ShaderUnit.h
+@@ -105,6 +105,22 @@ private:
+      */
+     [[nodiscard]] std::string applyFragmentTexCoordCompatibility (std::string source) const;
+ 
++public:
++    /**
++     * Wallpaper Engine compiles shaders with HLSL rules, where a vertex output wider than the fragment input it
++     * feeds is simply truncated. GLSL requires both declarations to match, so every fragment varying declared
++     * narrower than its vertex output is declared with the vertex's type and a macro of the same name truncates
++     * it where it's used (the preprocessor doesn't expand a macro inside its own expansion, so the declaration
++     * itself is left alone)
++     *
++     * @param fragment The fragment shader's source
++     * @param vertex The vertex shader's source
++     *
++     * @return The fragment source with matching varying declarations
++     */
++    [[nodiscard]] static std::string narrowFragmentVaryings (std::string fragment, const std::string& vertex);
++
++private:
+     /**
+      * Parses a COMBO value to add the proper define to the code
+      *
+diff --git a/src/WallpaperEngine/Testing/Cases/ShaderVaryings.cpp b/src/WallpaperEngine/Testing/Cases/ShaderVaryings.cpp
+new file mode 100644
+index 00000000..1e0aad3c
+--- /dev/null
++++ b/src/WallpaperEngine/Testing/Cases/ShaderVaryings.cpp
+@@ -0,0 +1,39 @@
++#include <catch2/catch_test_macros.hpp>
++
++#include "WallpaperEngine/Render/Shaders/ShaderUnit.h"
++
++using WallpaperEngine::Render::Shaders::ShaderUnit;
++
++// workshop 2403480896: the vertex writes "varying vec4 v_TexCoord" and the fragment reads "varying vec2 v_TexCoord"
++TEST_CASE ("A fragment varying narrower than its vertex output takes the vertex type and is truncated where used") {
++    const std::string vertex = "varying vec4 v_TexCoord;\nvoid main () { v_TexCoord = vec4 (0.0); }\n";
++    const std::string fragment = "varying vec2 v_TexCoord;\nvoid main () { vec2 position = v_TexCoord; }\n";
++
++    const std::string result = ShaderUnit::narrowFragmentVaryings (fragment, vertex);
++
++    CHECK (result.find ("varying vec4 v_TexCoord;") != std::string::npos);
++    CHECK (result.find ("#define v_TexCoord v_TexCoord.xy") != std::string::npos);
++    CHECK (result.find ("varying vec2 v_TexCoord;") == std::string::npos);
++    // the body is left alone: the macro does the truncation
++    CHECK (result.find ("vec2 position = v_TexCoord;") != std::string::npos);
++}
++
++TEST_CASE ("Varyings that already match, are wider in the fragment or only exist in one stage are left alone") {
++    const std::string vertex = "varying vec2 a;\nvarying vec3 b;\nvarying vec4 c;\n";
++    const std::string fragment = "varying vec2 a;\nvarying vec4 b;\nvarying vec2 d;\nvarying float c;\n";
++
++    const std::string result = ShaderUnit::narrowFragmentVaryings (fragment, vertex);
++
++    CHECK (result.find ("varying vec2 a;") != std::string::npos);
++    CHECK (result.find ("varying vec4 b;") != std::string::npos);
++    CHECK (result.find ("varying vec2 d;") != std::string::npos);
++    CHECK (result.find ("#define a") == std::string::npos);
++    CHECK (result.find ("#define b") == std::string::npos);
++    // a float fed by a vec4 keeps only the first component
++    CHECK (result.find ("varying vec4 c;\n#define c c.x") != std::string::npos);
++}
++
++TEST_CASE ("Without anything to change the fragment comes back as it was") {
++    const std::string fragment = "uniform vec4 g_Color;\nvoid main () {}\n";
++    CHECK (ShaderUnit::narrowFragmentVaryings (fragment, "varying vec4 v_TexCoord;\n") == fragment);
++}
+-- 
+2.56.0
+

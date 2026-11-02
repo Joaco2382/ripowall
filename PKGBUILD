@@ -20,6 +20,9 @@ depends=(
     'vlc'
     'yt-dlp'
     'hidamari'
+    # escenas de Wallpaper Engine: lo provee linux-wallpaperengine-ripowall (engine/PKGBUILD, con los arreglos
+    # de RipoWall) o, sin esos arreglos, linux-wallpaperengine-git del AUR
+    'linux-wallpaperengine'
 )
 optdepends=(
     'steam: Descargar wallpapers del Workshop'

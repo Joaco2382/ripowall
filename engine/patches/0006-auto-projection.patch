@@ -1,0 +1,216 @@
+From ba788ffd8917970798e0a2e4cf83b88c4e489f07 Mon Sep 17 00:00:00 2001
+From: Joaco2382 <104966815+Joaco2382@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 11:03:21 -0300
+Subject: [PATCH] fix: size "auto" orthogonal projections from 0, keep their
+ declared size
+
+Scenes with "orthogonalprojection": {"auto": true} were sized as twice the
+farthest distance of an image from 0, as if scene coordinates were centered.
+They start at 0 (an image centered at 960, 540 fills a 1920x1080 scene), so
+the scene came out twice as big and the content sat in a corner (workshop
+1341926663 and every gif scene: 1309424009, 1477353862, 1671718580).
+
+- The size is now where the farthest image ends (origin + size / 2).
+- An auto projection that also says its width and height (gif scenes do)
+  keeps them instead of being measured.
+
+Tests: AutoProjection (2 cases).
+---
+ CMakeLists.txt                                |  5 +++-
+ .../Data/Parsers/WallpaperParser.cpp          | 12 +++++++--
+ .../Render/Wallpapers/AutoProjection.cpp      | 16 +++++++++++
+ .../Render/Wallpapers/AutoProjection.h        | 22 +++++++++++++++
+ .../Render/Wallpapers/CScene.cpp              | 21 +++++++--------
+ .../Testing/Cases/AutoProjection.cpp          | 27 +++++++++++++++++++
+ 6 files changed, 88 insertions(+), 15 deletions(-)
+ create mode 100644 src/WallpaperEngine/Render/Wallpapers/AutoProjection.cpp
+ create mode 100644 src/WallpaperEngine/Render/Wallpapers/AutoProjection.h
+ create mode 100644 src/WallpaperEngine/Testing/Cases/AutoProjection.cpp
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 1456eeba..b132448b 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -418,6 +418,8 @@ set(COMMON_SOURCES
+     src/WallpaperEngine/Render/WallpaperState.cpp
+     src/WallpaperEngine/Render/Wallpapers/CScene.h
+     src/WallpaperEngine/Render/Wallpapers/CScene.cpp
++    src/WallpaperEngine/Render/Wallpapers/AutoProjection.h
++    src/WallpaperEngine/Render/Wallpapers/AutoProjection.cpp
+     src/WallpaperEngine/Render/Wallpapers/CVideo.h
+     src/WallpaperEngine/Render/Wallpapers/CVideo.cpp
+     src/WallpaperEngine/Render/Wallpapers/CWeb.h
+@@ -575,7 +577,8 @@ if(BUILD_TESTING)
+         src/WallpaperEngine/Testing/Cases/PuppetParser.cpp
+         src/WallpaperEngine/Testing/Cases/UniformTypes.cpp
+         src/WallpaperEngine/Testing/Cases/ShaderVaryings.cpp
+-        src/WallpaperEngine/Testing/Cases/HlslShapes.cpp)
++        src/WallpaperEngine/Testing/Cases/HlslShapes.cpp
++        src/WallpaperEngine/Testing/Cases/AutoProjection.cpp)
+ endif()
+ 
+ add_library(
+diff --git a/src/WallpaperEngine/Data/Parsers/WallpaperParser.cpp b/src/WallpaperEngine/Data/Parsers/WallpaperParser.cpp
+index c108a0df..240c5d14 100644
+--- a/src/WallpaperEngine/Data/Parsers/WallpaperParser.cpp
++++ b/src/WallpaperEngine/Data/Parsers/WallpaperParser.cpp
+@@ -8,6 +8,13 @@
+ 
+ using namespace WallpaperEngine::Data::Parsers;
+ 
++namespace {
++int autoProjectionSide (const WallpaperEngine::Data::JSON::JSON& projection, const char* key) {
++    const auto value = projection.find (key);
++    return value != projection.end () && value->is_number () ? value->get<int> () : 0;
++}
++} // namespace
++
+ WallpaperUniquePtr WallpaperParser::parse (const JSON& file, Project& project) {
+     switch (project.type) {
+ 	case Project::Type_Scene:
+@@ -69,8 +76,9 @@ SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project)
+                     .up = camera.require <glm::vec3> ("up", "Camera must have an up position"),
+                 },
+                 .projection = {
+-                    .width  = projection.optional ("auto", false) ? 0 : projection.require <int> ("width",  "Projection must have a width"),
+-                    .height = projection.optional ("auto", false) ? 0 : projection.require <int> ("height", "Projection must have a height"),
++                    // an "auto" projection can still say its size (gif scenes do), 0 means it has to be worked out
++                    .width  = projection.optional ("auto", false) ? autoProjectionSide (projection, "width") : projection.require <int> ("width",  "Projection must have a width"),
++                    .height = projection.optional ("auto", false) ? autoProjectionSide (projection, "height") : projection.require <int> ("height", "Projection must have a height"),
+                     .isAuto = projection.optional ("auto", false),
+                     .nearz = camera.user ("nearz", properties, 0.0f),
+                     .farz = camera.user ("farz", properties, 1000.0f),
+diff --git a/src/WallpaperEngine/Render/Wallpapers/AutoProjection.cpp b/src/WallpaperEngine/Render/Wallpapers/AutoProjection.cpp
+new file mode 100644
+index 00000000..60db8b65
+--- /dev/null
++++ b/src/WallpaperEngine/Render/Wallpapers/AutoProjection.cpp
+@@ -0,0 +1,16 @@
++#include "AutoProjection.h"
++
++#include <glm/common.hpp>
++
++glm::vec2 WallpaperEngine::Render::Wallpapers::autoProjectionSize (const std::vector<AutoProjectionImage>& images) {
++    glm::vec2 extent (0.0f);
++
++    for (const auto& image : images) {
++	if (image.size.x <= 0.0f || image.size.y <= 0.0f) {
++	    continue;
++	}
++	extent = glm::max (extent, glm::vec2 (image.origin) + image.size / 2.0f);
++    }
++
++    return extent;
++}
+diff --git a/src/WallpaperEngine/Render/Wallpapers/AutoProjection.h b/src/WallpaperEngine/Render/Wallpapers/AutoProjection.h
+new file mode 100644
+index 00000000..dbd4d231
+--- /dev/null
++++ b/src/WallpaperEngine/Render/Wallpapers/AutoProjection.h
+@@ -0,0 +1,22 @@
++#pragma once
++
++#include <vector>
++
++#include <glm/vec2.hpp>
++#include <glm/vec3.hpp>
++
++namespace WallpaperEngine::Render::Wallpapers {
++struct AutoProjectionImage {
++    /** Center of the image in scene coordinates (0, 0 is the bottom left corner of the scene) */
++    glm::vec3 origin;
++    glm::vec2 size;
++};
++
++/**
++ * Size of a scene whose orthogonal projection is "auto" and doesn't say its width and height: scene coordinates
++ * start at 0, so the scene ends where the farthest image does
++ *
++ * @return The size, or 0x0 when there are no images to measure
++ */
++glm::vec2 autoProjectionSize (const std::vector<AutoProjectionImage>& images);
++} // namespace WallpaperEngine::Render::Wallpapers
+diff --git a/src/WallpaperEngine/Render/Wallpapers/CScene.cpp b/src/WallpaperEngine/Render/Wallpapers/CScene.cpp
+index ab63d78e..4aaf6ac7 100644
+--- a/src/WallpaperEngine/Render/Wallpapers/CScene.cpp
++++ b/src/WallpaperEngine/Render/Wallpapers/CScene.cpp
+@@ -5,6 +5,7 @@
+ 
+ #include "WallpaperEngine/Render/WallpaperState.h"
+ 
++#include "AutoProjection.h"
+ #include "CScene.h"
+ #include "WallpaperEngine/Logging/Log.h"
+ 
+@@ -37,10 +38,9 @@ CScene::CScene (
+     float width = scene->camera.projection.width;
+     float height = scene->camera.projection.height;
+ 
+-    // detect size if the orthogonal project is auto
+-    if (scene->camera.projection.isAuto) {
+-	glm::vec2 maxExtent = { 0.0f, 0.0f };
+-
++    // an "auto" projection without its size ends where the farthest image does
++    if (scene->camera.projection.isAuto && (width <= 0.0f || height <= 0.0f)) {
++	std::vector<AutoProjectionImage> images;
+ 	for (const auto& object : scene->objects) {
+ 	    if (!object->is<Image> ()) {
+ 		continue;
+@@ -51,16 +51,13 @@ CScene::CScene (
+ 		continue;
+ 	    }
+ 
+-	    const glm::vec3 origin = image->origin->value->getVec3 ();
+-	    const glm::vec2 halfSize = image->size / 2.0f;
+-
+-	    maxExtent.x = glm::max (maxExtent.x, glm::abs (origin.x) + halfSize.x);
+-	    maxExtent.y = glm::max (maxExtent.y, glm::abs (origin.y) + halfSize.y);
++	    images.push_back ({ .origin = image->origin->value->getVec3 (), .size = image->size });
+ 	}
+ 
+-	if (maxExtent.x > 0.0f && maxExtent.y > 0.0f) {
+-	    width = maxExtent.x * 2.0f;
+-	    height = maxExtent.y * 2.0f;
++	const glm::vec2 size = autoProjectionSize (images);
++	if (size.x > 0.0f && size.y > 0.0f) {
++	    width = size.x;
++	    height = size.y;
+ 	} else {
+ 	    width = this->getContext ().getOutput ().getFullWidth ();
+ 	    height = this->getContext ().getOutput ().getFullHeight ();
+diff --git a/src/WallpaperEngine/Testing/Cases/AutoProjection.cpp b/src/WallpaperEngine/Testing/Cases/AutoProjection.cpp
+new file mode 100644
+index 00000000..c19faac4
+--- /dev/null
++++ b/src/WallpaperEngine/Testing/Cases/AutoProjection.cpp
+@@ -0,0 +1,27 @@
++#include <catch2/catch_approx.hpp>
++#include <catch2/catch_test_macros.hpp>
++
++#include "WallpaperEngine/Render/Wallpapers/AutoProjection.h"
++
++using Catch::Approx;
++using namespace WallpaperEngine::Render::Wallpapers;
++
++// workshop 1341926663: "orthogonalprojection": {"auto": true, "width": null, "height": null} and a 1366x768 image
++// centered at (683, 384). Measuring it as if coordinates were centered on 0 gave 2732x1536 and the image ended up
++// in a corner
++TEST_CASE ("An auto projection ends where the farthest image does") {
++    const auto size = autoProjectionSize ({ { .origin = { 683.0f, 384.0f, 0.0f }, .size = { 1366.0f, 768.0f } } });
++    CHECK (size.x == Approx (1366.0f));
++    CHECK (size.y == Approx (768.0f));
++}
++
++TEST_CASE ("Every image counts, images without a size don't") {
++    const auto size = autoProjectionSize (
++	{ { .origin = { 960.0f, 540.0f, 0.0f }, .size = { 1920.0f, 1080.0f } },
++	  { .origin = { 2000.0f, 100.0f, 0.0f }, .size = { 200.0f, 100.0f } },
++	  { .origin = { 5000.0f, 5000.0f, 0.0f }, .size = { 0.0f, 0.0f } } }
++    );
++    CHECK (size.x == Approx (2100.0f));
++    CHECK (size.y == Approx (1080.0f));
++    CHECK (autoProjectionSize ({}).x == Approx (0.0f));
++}
+-- 
+2.56.0
+

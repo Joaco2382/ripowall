@@ -1,0 +1,46 @@
+From 5747ebe636fea0e7c77e4e4ed61470c86dc893ba Mon Sep 17 00:00:00 2001
+From: Joaco2382 <104966815+Joaco2382@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 21:48:08 -0300
+Subject: [PATCH] feat: truncate mixed vector sizes in arithmetic like HLSL
+
+Wallpaper Engine writes its shaders in GLSL but compiles them with HLSL
+rules, where vec3 + vec2 truncates the vec3. Valid GLSL never mixes vector
+sizes in +, -, * or /, so this only affects code that would otherwise fail
+to compile (workshop 2405891694).
+---
+ glslang/MachineIndependent/Intermediate.cpp | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+diff --git a/src/External/glslang-WallpaperEngine/glslang/MachineIndependent/Intermediate.cpp b/src/External/glslang-WallpaperEngine/glslang/MachineIndependent/Intermediate.cpp
+index 2f9b2bc0..aad627ea 100644
+--- a/src/External/glslang-WallpaperEngine/glslang/MachineIndependent/Intermediate.cpp
++++ b/src/External/glslang-WallpaperEngine/glslang/MachineIndependent/Intermediate.cpp
+@@ -1061,6 +1061,25 @@ void TIntermediate::addBiShapeConversion(TOperator op, TIntermTyped*& lhsNode, T
+         break;
+     case EShSourceGlsl:
+     default:
++        // Wallpaper Engine writes its shaders in GLSL but compiles them with HLSL rules, where vectors of different
++        // sizes in an arithmetic operation are truncated to the smaller one. Valid GLSL never mixes sizes there, so
++        // only code that would otherwise fail to compile is affected
++        if (lhsNode->isVector() && rhsNode->isVector() && !lhsNode->getType().isArray() &&
++            !rhsNode->getType().isArray() && lhsNode->getVectorSize() != rhsNode->getVectorSize()) {
++            switch (op) {
++            case EOpAdd:
++            case EOpSub:
++            case EOpMul:
++            case EOpDiv:
++                if (lhsNode->getVectorSize() > rhsNode->getVectorSize())
++                    lhsNode = addShapeConversion(TType(lhsNode->getBasicType(), EvqTemporary, rhsNode->getVectorSize()), lhsNode);
++                else
++                    rhsNode = addShapeConversion(TType(rhsNode->getBasicType(), EvqTemporary, lhsNode->getVectorSize()), rhsNode);
++                break;
++            default:
++                break;
++            }
++        }
+         return;
+     }
+ 
+-- 
+2.56.0
+
