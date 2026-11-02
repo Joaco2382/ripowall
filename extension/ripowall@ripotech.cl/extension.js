@@ -68,6 +68,9 @@ class ClienteWayland {
         const launcher = new Gio.SubprocessLauncher({
             flags: Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_MERGE,
         });
+        // Clientes Wayland de GNOME Shell: linux-wallpaperengine elige su salida por esta variable y se cierra
+        // sin ella (una sesión arrancada sin el gestor de inicio puede no tenerla)
+        launcher.setenv('XDG_SESSION_TYPE', 'wayland', true);
         if (Meta.WaylandClient.new_subprocess) {  // GNOME 49 o más nuevo
             this._client = Meta.WaylandClient.new_subprocess(global.context, launcher, argv);
             this._proc = this._client.get_subprocess();

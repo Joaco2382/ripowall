@@ -41,13 +41,13 @@ docker run --rm --device /dev/dri -e LANG=C.UTF-8 -e LC_ALL=C.UTF-8 -e ESCENA="$
   # 2) el motor solo
   dbus-run-session -- bash -c "
     pulseaudio --daemonize=yes --exit-idle-time=-1 2>/dev/null
-    mutter --headless --wayland --no-x11 --virtual-monitor 1280x720 --wayland-display solo > /out/mutter.log 2>&1 &
+    gnome-shell --headless --wayland --no-x11 --virtual-monitor 1280x720 --wayland-display solo > /out/solo-shell.log 2>&1 &
     for i in \$(seq 1 50); do [ -S \$XDG_RUNTIME_DIR/solo ] && break; sleep 0.2; done
     WAYLAND_DISPLAY=solo XDG_SESSION_TYPE=wayland \$HOME/.local/bin/linux-wallpaperengine --assets-dir /assets \
       --silent --disable-mouse --fps 30 --window 0x0x1280x720 --scaling fill --screenshot /out/motor.png \
       --screenshot-delay 5 /escena/\$ESCENA > /out/motor-solo.log 2>&1 &
     for i in \$(seq 1 90); do [ -s /out/motor.png ] && break; sleep 1; done; sleep 1
-    pkill -9 -f linux-wallpaperengine; pulseaudio --kill 2>/dev/null; true
+    pkill -9 -f linux-wallpaperengine; pkill -f \"gnome-shell --headless\"; pulseaudio --kill 2>/dev/null; sleep 2; true
   "
   # 3) GNOME con RipoWall: la extensión lanza el motor (recursos de WE donde los busca la extensión)
   mkdir -p $HOME/.local/share/Steam/steamapps/common/wallpaper_engine
