@@ -2,7 +2,7 @@
 
 **Los fondos de Wallpaper Engine en GNOME (Linux): videos, fondos web, presets y escenas, animados en cada monitor.**
 
-[English](README.md)
+Un producto creado por **[RipoTech](https://ripotech.cl)** · [English](README.md)
 
 RipoWall toma los fondos a los que te suscribes en el Workshop de Steam de
 [Wallpaper Engine](https://store.steampowered.com/app/431960/Wallpaper_Engine/) y los pone como fondo de tu escritorio
@@ -140,4 +140,5 @@ El CI revisa secretos (ggshield) y corre la suite de pruebas con GTK4/WebKit rea
 - RipoWall no está afiliado a Wallpaper Engine ni a Valve. Necesitas tu propia copia de Wallpaper Engine, y los fondos
   son de sus autores.
 
-RipoWall es software libre bajo la [GNU GPL v3](LICENSE). Hecho por [RipoTech](https://ripotech.cl).
+RipoWall es un producto creado por **[RipoTech](https://ripotech.cl)** (Chile) y publicado como software libre bajo la
+[GNU GPL v3](LICENSE). Copyright © 2026 RipoTech.

@@ -28,6 +28,7 @@ docker run --rm --device /dev/dri -e LANG=C.UTF-8 -e LC_ALL=C.UTF-8 -e ESCENA="$
   # los espejos HTTP de Ubuntu a veces responden 403 desde Docker: HTTPS
   sed -i "s|http://archive.ubuntu.com|https://archive.ubuntu.com|g; s|http://security.ubuntu.com|https://archive.ubuntu.com|g" \
     /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+  sed -i "s|http://deb.debian.org|https://deb.debian.org|g" /etc/apt/sources.list.d/*.sources 2>/dev/null || true
   export HOME=/tmp/casa XDG_RUNTIME_DIR=/tmp/run XDG_CONFIG_HOME=/tmp/casa/.config GSETTINGS_BACKEND=keyfile
   mkdir -p "$HOME" "$XDG_RUNTIME_DIR" "$XDG_CONFIG_HOME/glib-2.0/settings" "$XDG_CONFIG_HOME/ripowall" && chmod 700 "$XDG_RUNTIME_DIR"
   cp -r /repo /tmp/ripowall

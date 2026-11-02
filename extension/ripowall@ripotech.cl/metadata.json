@@ -1,7 +1,7 @@
 {
   "uuid": "ripowall@ripotech.cl",
   "name": "RipoWall",
-  "description": "Fondos animados de Wallpaper Engine en GNOME: pone las ventanas del reproductor de RipoWall como fondo de cada monitor.",
+  "description": "Fondos animados de Wallpaper Engine en GNOME: pone las ventanas del reproductor de RipoWall como fondo de cada monitor.\n\nUn producto de RipoTech — https://ripotech.cl",
   "shell-version": [
     "45",
     "46",

@@ -2,7 +2,7 @@
 
 **Wallpaper Engine wallpapers on GNOME (Linux): videos, web wallpapers, presets and scenes, animated on every monitor.**
 
-[Español](README.es.md)
+A product created by **[RipoTech](https://ripotech.cl)** · [Español](README.es.md)
 
 RipoWall takes the wallpapers you subscribe to in the Steam Workshop of
 [Wallpaper Engine](https://store.steampowered.com/app/431960/Wallpaper_Engine/) and plays them as your GNOME desktop
@@ -136,4 +136,5 @@ CI runs a secret scan (ggshield) and the test suite with real GTK4/WebKit on eve
 - RipoWall is not affiliated with Wallpaper Engine or Valve. You need your own copy of Wallpaper Engine, and the
   wallpapers belong to their authors.
 
-RipoWall is free software under the [GNU GPL v3](LICENSE). Made by [RipoTech](https://ripotech.cl).
+RipoWall is a product created by **[RipoTech](https://ripotech.cl)** (Chile) and released as free software under the
+[GNU GPL v3](LICENSE). Copyright © 2026 RipoTech.

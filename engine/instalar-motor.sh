@@ -70,20 +70,20 @@ instalar_dependencias() {
         sudo apt-get update && sudo apt-get install -y git pkg-config build-essential cmake \
             libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl-dev libglew-dev freeglut3-dev libsdl2-dev \
             liblz4-dev libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libxxf86vm-dev libglm-dev \
-            libglfw3-dev libmpv-dev libpulse-dev libfftw3-dev libfreetype-dev \
+            libglfw3-dev libmpv-dev libpulse-dev libfftw3-dev libfreetype-dev libdbus-1-dev \
             libwayland-dev wayland-protocols libegl-dev libxkbcommon-dev
     elif command -v dnf >/dev/null; then
         sudo dnf install -y git pkgconf-pkg-config gcc gcc-c++ cmake make \
             libXrandr-devel libXinerama-devel libXcursor-devel libXi-devel mesa-libGL-devel mesa-libEGL-devel \
             glew-devel freeglut-devel SDL2-devel lz4-devel ffmpeg-free-devel libXxf86vm-devel glm-devel glfw-devel \
-            mpv-devel pulseaudio-libs-devel fftw-devel gmp-devel freetype-devel \
+            mpv-devel pulseaudio-libs-devel fftw-devel gmp-devel freetype-devel dbus-devel \
             wayland-devel wayland-protocols-devel libxkbcommon-devel
     elif command -v zypper >/dev/null; then
         sudo zypper install -y git pkg-config gcc-c++ cmake make libXrandr-devel libXinerama-devel \
             libXcursor-devel libXi-devel Mesa-libGL-devel Mesa-libEGL-devel glew-devel freeglut-devel \
             libSDL2-devel liblz4-devel ffmpeg-7-libavcodec-devel ffmpeg-7-libavformat-devel \
             ffmpeg-7-libavutil-devel ffmpeg-7-libswscale-devel libXxf86vm-devel glm-devel libglfw-devel \
-            mpv-devel libpulse-devel fftw3-devel freetype2-devel wayland-devel wayland-protocols-devel \
+            mpv-devel libpulse-devel fftw3-devel freetype2-devel dbus-1-devel wayland-devel wayland-protocols-devel \
             libxkbcommon-devel
     else
         echo "Gestor de paquetes no reconocido: instala a mano las dependencias de" >&2
