@@ -349,7 +349,11 @@ class Escenas {
     _lanzar(conector, e, clave) {
         const geo = global.display.get_monitor_geometry(this._monitor(conector));
         const cliente = new ClienteWayland(`escena ${conector}`, () => {
-            const motor = GLib.find_program_in_path('linux-wallpaperengine');
+            // primero el de ~/.local/bin (el motor con los arreglos de RipoWall fuera de Arch, que puede no estar
+            // en el PATH de GNOME hasta volver a iniciar sesión), igual que hidamari_core.motor_de_escenas()
+            const local = GLib.build_filenamev([GLib.get_home_dir(), '.local', 'bin', 'linux-wallpaperengine']);
+            const motor = GLib.file_test(local, GLib.FileTest.IS_EXECUTABLE)
+                ? local : GLib.find_program_in_path('linux-wallpaperengine');
             if (!motor)
                 return null;
             // --scaling fill va justo después de --window (se aplica a la salida anterior): las escenas

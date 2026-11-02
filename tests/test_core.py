@@ -277,5 +277,33 @@ class TestReglaDeReproduccion(unittest.TestCase):
             self.assertIs(R.debe_reproducir(*args), esperado, args)
 
 
+
+class TestMotorDeEscenas(unittest.TestCase):
+    """El motor de ~/.local/bin (el de RipoWall fuera de Arch) se usa aunque no esté en el PATH."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.local = os.path.join(self.tmp.name, "linux-wallpaperengine")
+        p = mock.patch.object(H, "MOTOR_LOCAL", self.local)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_prefiere_el_de_local_bin_aunque_no_este_en_el_path(self):
+        with open(self.local, "w") as f:
+            f.write("#!/bin/sh\n")
+        os.chmod(self.local, 0o755)
+        with mock.patch.object(H.shutil, "which", return_value="/usr/bin/linux-wallpaperengine"):
+            self.assertEqual(H.motor_de_escenas(), self.local)
+        with mock.patch.object(H.shutil, "which", return_value=None):
+            self.assertTrue(H.escenas_disponibles())
+
+    def test_sin_local_usa_el_del_path(self):
+        with mock.patch.object(H.shutil, "which", return_value="/usr/bin/linux-wallpaperengine"):
+            self.assertEqual(H.motor_de_escenas(), "/usr/bin/linux-wallpaperengine")
+        with mock.patch.object(H.shutil, "which", return_value=None):
+            self.assertFalse(H.escenas_disponibles())
+
+
 if __name__ == "__main__":
     unittest.main()

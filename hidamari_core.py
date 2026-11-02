@@ -121,9 +121,20 @@ def _html_de_web(carpeta: str, data: dict) -> bool:
     return os.path.isfile(os.path.join(carpeta, data.get("file") or "index.html"))
 
 
+MOTOR_LOCAL = os.path.expanduser("~/.local/bin/linux-wallpaperengine")
+
+
+def motor_de_escenas() -> str | None:
+    """linux-wallpaperengine que usa RipoWall: primero el de ~/.local/bin (donde engine/instalar-motor.sh deja el
+    motor con los arreglos fuera de Arch, y que puede no estar en el PATH hasta volver a iniciar sesión)."""
+    if os.access(MOTOR_LOCAL, os.X_OK):
+        return MOTOR_LOCAL
+    return shutil.which("linux-wallpaperengine")
+
+
 def escenas_disponibles() -> bool:
     """Las escenas se dibujan con linux-wallpaperengine: sin él no se ofrecen."""
-    return shutil.which("linux-wallpaperengine") is not None
+    return motor_de_escenas() is not None
 
 
 def get_all_wallpapers() -> list[Wallpaper]:

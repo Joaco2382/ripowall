@@ -97,9 +97,9 @@ EOF
 
     local encontrado
     encontrado="$(command -v linux-wallpaperengine || true)"
-    if [ "$encontrado" != "$BIN/linux-wallpaperengine" ]; then
-        echo "Atención: el comando linux-wallpaperengine que se usa es $encontrado, no el de RipoWall." >&2
-        echo "Poner $BIN antes en el PATH o desinstalar el otro motor." >&2
+    # RipoWall busca primero en $BIN (la extensión y el catálogo), así que esto solo importa en la terminal
+    if [ -n "$encontrado" ] && [ "$encontrado" != "$BIN/linux-wallpaperengine" ]; then
+        echo "Nota: en la terminal, linux-wallpaperengine es $encontrado; RipoWall usa igual el de $BIN." >&2
     fi
 }
 
