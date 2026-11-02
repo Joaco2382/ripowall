@@ -127,9 +127,9 @@ def check_steam_running(report: DiagnosticReport) -> None:
         report.results.append(CheckResult("ENVIRONMENT", "Steam running", "ok",
             f"Steam corriendo ({len(pids)} proceso(s))."))
     else:
-        report.results.append(CheckResult("ENVIRONMENT", "Steam running", "error",
-            "Steam no esta corriendo.", "Inicia Steam: steam &",
-            "Wallpaper Engine y autenticacion Steam requieren el cliente corriendo."))
+        # RipoWall muestra los fondos ya descargados sin Steam: solo hace falta para bajar suscripciones nuevas
+        report.results.append(CheckResult("ENVIRONMENT", "Steam running", "ok",
+            "Steam no está abierto (no hace falta para mostrar fondos; ábrelo para descargar suscripciones nuevas)."))
 
 
 def check_proton_availability(report: DiagnosticReport) -> None:
@@ -277,8 +277,9 @@ def check_we_processes(report: DiagnosticReport) -> None:
         report.results.append(CheckResult("WALLPAPER_ENGINE", "WE processes", "ok",
             f"WE corriendo: wallpaper64.exe PID {pids[0]}{ui_msg}."))
     else:
-        report.results.append(CheckResult("WALLPAPER_ENGINE", "WE processes", "warning",
-            "Wallpaper Engine no esta corriendo.", "ripowall-we --browse"))
+        # RipoWall dibuja los fondos por su cuenta: la app de Wallpaper Engine (Proton) es opcional
+        report.results.append(CheckResult("WALLPAPER_ENGINE", "WE processes", "ok",
+            "La app de Wallpaper Engine no está abierta (RipoWall no la necesita)."))
 
 
 def check_cef_networking(report: DiagnosticReport) -> None:

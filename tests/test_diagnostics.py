@@ -29,5 +29,17 @@ class TestCodecH264(unittest.TestCase):
         self.assertIn(D.check_codec_h264, D.ALL_CHECKS)
 
 
+class TestSinSteamAbierto(unittest.TestCase):
+    """Sin Steam ni la app de Wallpaper Engine abiertos, RipoWall igual muestra fondos: no es un error."""
+
+    def test_steam_y_we_cerrados_no_son_error(self):
+        r = D.DiagnosticReport()
+        with mock.patch.object(D, "_pgrep", return_value=[]):
+            D.check_steam_running(r)
+            D.check_we_processes(r)
+        self.assertEqual([x.status for x in r.results], ["ok", "ok"])
+        self.assertFalse(D.has_critical_errors(r))
+
+
 if __name__ == "__main__":
     unittest.main()
