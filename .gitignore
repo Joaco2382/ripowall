@@ -10,3 +10,6 @@ __pycache__/
 .claude/worktrees/
 .serena/
 .gitnexus/
+
+# Generado por herramientas de análisis (no va al repo)
+graphify-out/

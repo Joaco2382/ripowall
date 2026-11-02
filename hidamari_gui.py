@@ -1952,7 +1952,7 @@ class RipoWallApp(Adw.Application):
         dialog.set_version("3.2.0")
         dialog.set_website("https://ripotech.cl")
         dialog.set_copyright("© 2026 RipoTech — ripotech.cl")
-        dialog.set_developers(["Joaquin Espinosa <104966815+Joaco2382@users.noreply.github.com>"])
+        dialog.set_developers(["Joaquín Espinosa https://github.com/Joaco2382"])
         dialog.set_designers(["RipoTech Design"])
         dialog.set_license_type(Gtk.License.GPL_3_0)
         dialog.present(self.active_window)

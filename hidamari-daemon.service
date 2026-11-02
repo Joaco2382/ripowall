@@ -1,5 +1,5 @@
 [Unit]
-Description=Hidamari Daemon — Wallpapers inteligentes multi-monitor
+Description=RipoWall — asigna y rota los fondos animados de cada monitor
 After=graphical-session.target
 Wants=graphical-session.target
 

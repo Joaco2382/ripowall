@@ -1,11 +1,11 @@
 [Desktop Entry]
 Type=Application
 Name=RipoWall
-Comment=Gestiona wallpapers animados en Linux integrando Wallpaper Engine + Hidamari
+Comment=Fondos animados de Wallpaper Engine en GNOME
 Exec=hidamari-gui
 Icon=ripowall
 Categories=GNOME;GTK;Video;Utility;
 StartupNotify=true
 Terminal=false
-Keywords=wallpaper;animated;live;video;steam;workshop;hidamari;
+Keywords=wallpaper;animated;live;video;steam;workshop;wallpaper engine;
 X-RipoTech-Product=RipoWall

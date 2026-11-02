@@ -1,178 +1,60 @@
 # CLAUDE.md — RipoWall
 
-Proyecto RipoWall v3.2: launcher de Wallpaper Engine para Linux + GUI nativa GTK4 de gestion de wallpapers animados con Workshop nativo integrado.
+RipoWall: fondos animados de Wallpaper Engine (video, web, presets y escenas) en GNOME 45-51 sobre Wayland.
+Para usuarios: `README.md` (inglés) y `README.es.md`.
 
 ## Stack
 
-- **Lenguaje:** Python 3.11+
-- **GUI:** GTK4 + libadwaita (sin Glade/XML, todo programatico)
-- **WebView:** WebKitGTK 6.0 (`webkitgtk-6.0`) SOLO para SteamLoginDialog (login inicial)
-- **Steam API:** `workshop_api.py` → Steam Web API (IPublishedFileService + ISteamRemoteStorage)
-- **DBus:** pydbus + gdbus para Mutter DisplayConfig y Hidamari
-- **Systemd:** servicios user para daemon y rotacion
-- **Proton:** CachyOS SLR (o cualquier Proton compatible)
+- **Python 3.11+**, GTK4 + libadwaita (todo programático, sin XML), WebKitGTK 6.0, GStreamer (Gtk.MediaFile)
+- **Extensión de GNOME Shell** (GJS, ESM, GNOME 45+): `extension/ripowall@ripotech.cl/`
+- **Motor de escenas:** linux-wallpaperengine en un commit fijo + parches propios (`engine/`)
+- **Systemd user:** `hidamari-daemon.service` (rotación, monitores, Workshop)
 
-## Arquitectura v3.2
+## Arquitectura
 
 ```
-workshop_api.py                ← Steam Web API client: busqueda, detalles, subscribe/unsubscribe
-wallpaper_engine_launcher.py  ← Lanza WE via Steam/Proton (portable, auto-detecta todo)
-hidamari_core.py              ← Modulo compartido: catalogo, monitores, DBus, config, WE API
-hidamari-daemon               ← Servicio systemd: rotacion cada 10 min, hotplug, Workshop watcher
-hidamari-gui                  ← App GTK4 + Adwaita: galeria GridView, sidebar monitores, busqueda, WorkshopBrowser NATIVO
+hidamari_core.py        catálogo del Workshop (video/web/scene/preset), config ~/.config/ripowall/config.json,
+                        control del reproductor por D-Bus. No importa GTK (lo comparten daemon y GUI).
+hidamari_daemon.py      servicio: asigna/rota fondos, monitores conectados/desconectados, suscripciones nuevas
+hidamari_gui.py         app GTK4: galería, monitores, rotación, navegador del Workshop (workshop_api.py)
+ripowall_renderer.py    reproductor: una ventana por monitor, título «@ripowall!<conector>»; acciones D-Bus
+                        (pausado, silencio, volumen, cubierto, recargar, escenas). Web: esquema ripowall-fondo://
+                        que solo sirve la carpeta del fondo.
+extension.js            lanza el reproductor y linux-wallpaperengine como Meta.WaylandClient, mantiene sus ventanas
+                        minimizadas y fuera de Alt+Tab/actividades, pone un Clutter.Clone en el fondo de cada monitor
+                        (asociado por conector) y pausa al tapar el monitor una ventana maximizada.
+ripowall_diagnostics.py revisa la instalación (extensión, reproductor, códec H.264, Wayland, Workshop)
 ```
 
-### Componentes de la GUI (hidamari-gui)
+`hidamari-gui` y `hidamari-daemon` son enlaces a los `.py` (nombres históricos de cuando usaba Hidamari).
 
-| Clase / Seccion | Proposito |
-|----------------|-----------|
-| `RipoWallApp` | Punto de entrada, Gtk.Application |
-| `RipoWallWindow` | Ventana principal: sidebar, galeria, barra de herramientas |
-| `WorkshopCard(GObject)` | Item del Workshop para GridView (publishedfileid, title, preview_path, stats, is_subscribed) |
-| `WorkshopBrowser(Adw.Dialog)` | UI 100% GTK4 nativa: SearchBar, filtros, tags FlowBox, GridView, paginacion |
-| `SteamLoginDialog(Adw.Dialog)` | WebView MINIMO solo para login de Steam (extrae cookie y cierra) |
-| `MonitorRow` | Sidebar: icono y nombre del monitor, asignacion actual |
+## Compatibilidad de la extensión
 
-### Flujo del Workshop Nativo
+- GNOME 45-48: `Meta.WaylandClient.new()` + `spawnv()`; GNOME 49+: `new_subprocess()`. Se detecta en `ClienteWayland`.
+- GNOME 50 quitó X11 (y `Meta.is_wayland_compositor`): usar APIs de Meta solo si existen.
+- Después de cada cambio de la extensión, correr la matriz completa (abajo), no solo la versión de este PC.
 
-```
-WorkshopBrowser (UI GTK4 nativa)
-        │
-        ├─ SearchBar → workshop_api.search_workshop()
-        ├─ SortDropdown → query_type (trending/popular/recent)
-        ├─ TagChips → requiredtags
-        ├─ GridView → WorkshopCard con thumbnails descargados via CDN
-        ├─ Subscribe btn → workshop_api.subscribe(id) con cookie de sesion
-        │
-        ▼
-Steam Web API (IPublishedFileService/QueryFiles/v1/)
-        │  requiere API key en ~/.config/ripowall/steam_api_key
-        ▼
-Steam Community (sharedfiles/subscribe/)
-        │  requiere cookie de sesion → SteamLoginDialog (WebView minimo)
-        ▼
-Steam cliente detecta suscripcion → descarga MP4
-        │
-        ▼
-hidamari-daemon (watcher) detecta nuevos archivos
-        │
-        ▼
-hidamari_core: get_all_wallpapers() → symlinks planos en ~/Videos/Hidamari/
-        │
-        ▼
-Hidamari reproduce como fondo de escritorio GNOME
-```
-
-## Flujo general
-
-```
-Steam Workshop (WebView o app WE) → MP4 en workshop/content/431960/
-                                         ↓
-                            hidamari_core: get_all_wallpapers()
-                                         ↓
-                            ~/Videos/Hidamari/ (symlinks planos)
-                                         ↓
-                            Hidamari → reproduce en escritorio GNOME
-                                         ↓
-                            RipoWall GUI ← DBus → asigna/quita/controla
-```
-
-## WorkshopBrowser — Detalles tecnicos (v3.2)
-
-- **UI:** 100% GTK4 nativa: `Gtk.SearchEntry`, `Gtk.DropDown` (sort), `Gtk.FlowBox` (tags), `Gtk.GridView` (wallpapers)
-- **API:** `workshop_api.py` consume Steam Web API (`IPublishedFileService/QueryFiles/v1/`, `ISteamRemoteStorage/GetPublishedFileDetails/v1/`)
-- **API Key:** `~/.config/ripowall/steam_api_key` (gratis en https://steamcommunity.com/dev/apikey)
-- **Previews:** Descargados del CDN de Steam via `workshop_api.download_preview()`, cache en `~/.cache/ripowall/workshop/`
-- **Subscribe:** `POST` a `steamcommunity.com/sharedfiles/subscribe/` con cookie de sesion
-- **Login:** `SteamLoginDialog` — WebView MINIMO solo para login de Steam, extrae cookie via `CookieManager.get_cookies()`, se cierra automaticamente
-- **Paginacion:** Cursor-based (Steam API) + indicadores `[Prev] Pagina X de Y [Next]`
-- **Threading:** API calls en `threading.Thread`, UI updates via `GLib.idle_add`
-
-## SteamLoginDialog — Solo para extraer cookie de sesion
-
-- **WebView:** `WebKit.WebView()` minimo, carga `steamcommunity.com/login/home/`
-- **Cookie extraction:** `webview.get_network_session().get_cookie_manager().get_cookies()` async
-- **Deteccion de login:** `load-changed == FINISHED` + URL sin "login" → extrae cookies
-- **Seguridad:** Sin acceso al portapapeles, developer extras deshabilitados
-- **Almacenamiento:** Cookie guardada en `~/.config/ripowall/steam_session` (0600)
-
-## WebKitGTK 6.0 — Paquetes por distro
-
-| Distro | Paquete |
-|--------|---------|
-| Arch | `webkitgtk-6.0` |
-| Ubuntu/Debian | `libwebkitgtk-6.0-dev` |
-| Fedora | `webkitgtk6.0-devel` |
-| openSUSE | `webkitgtk6.0-devel` |
-
-> La GUI requiere WebKitGTK 6.0 SOLO para el SteamLoginDialog (login inicial). Si no esta disponible, la app funciona igual pero sin posibilidad de suscribirse a wallpapers (solo busqueda y navegacion).
-
-## Paths clave (TODO portable, no hardcodeados)
-
-| Que | Ruta |
-|-----|------|
-| Workshop WE | `~/.local/share/Steam/steamapps/workshop/content/431960/` |
-| Config Hidamari | `~/.config/hidamari/config.json` |
-| Symlinks planos | `$(xdg-user-dir VIDEOS)/Hidamari/` |
-| Scripts RipoWall | `~/.local/bin/` |
-| Systemd user | `~/.config/systemd/user/` |
-
-## Convenciones de codigo
-
-- Python: type hints en funciones publicas, docstrings en modulo y funciones exportadas
-- Sin hardcodear paths (usar `Path.home()`, `xdg-user-dir`, deteccion runtime)
-- `hidamari_core.py` no importa GTK (es compartido entre daemon y GUI)
-- La GUI usa `threading` para operaciones bloqueantes + `GLib.idle_add` para UI updates
-- La GUI es un solo archivo sin plantillas XML
-- WebKit import: `import gi; gi.require_version('WebKit', '6.0'); from gi.repository import WebKit`
-
-## Systemd services
-
-| Servicio | Proposito | Activacion |
-|----------|----------|-----------|
-| `hidamari-daemon.service` | Daemon principal: rotacion, hotplug, watcher | `graphical-session.target` |
-
-## Comandos
+## Pruebas
 
 ```bash
-# Test del core
-python3 hidamari_core.py --test
-
-# GUI
-./hidamari-gui
-
-# WE Launcher
-python3 wallpaper_engine_launcher.py --status
-python3 wallpaper_engine_launcher.py --browse
-python3 wallpaper_engine_launcher.py --kill
-
-# Daemon
-./hidamari-daemon --once          # ejecutar una vez y salir
-./hidamari-daemon --no-rotate     # sin rotacion automatica
-
-# Systemd
-systemctl --user status hidamari-daemon
-journalctl --user -u hidamari-daemon -f
+python3 -m unittest discover -s tests                     # (GDK_BACKEND=x11 si GTK se cuelga en la terminal)
+scripts/probar-gnome-docker.sh <distro>                   # GNOME de otra distro en Docker (ver distros en el script)
+MONITORES="1920x1080 1280x1024" PRUEBA=caida|ciclo scripts/probar-gnome-docker.sh <distro>
+scripts/probar-instalador-docker.sh <distro>              # install.sh de punta a punta
+scripts/probar-extension.sh                               # GNOME anidado en este PC
+scripts/capturar-escena.sh <salida> <id>                  # captura de una escena con el motor
+python3 ripowall_diagnostics.py                           # diagnóstico de la instalación real
 ```
 
-## Diagnostico
+CI (`.github/workflows/ci.yml`): ggshield + compila, ruff (E9,F) y la suite con xvfb, gjs y WebKit reales.
 
-```bash
-# Diagnostico completo del sistema
-python3 ripowall_diagnostics.py
-```
+## Convenciones
 
-## Instalacion dev
+- Type hints en funciones públicas y docstrings; sin rutas fijas (`Path.home()`, detección en runtime)
+- Operaciones bloqueantes de la GUI en `threading` + `GLib.idle_add`
+- Errores visibles: nada de `except: pass`; registrar y avisar en la GUI
+- Pruebas que puedan fallar: cada arreglo con su prueba, comprobando que falla sin el arreglo
 
-```bash
-./install.sh  # opcion 3 (solo scripts)
-```
-
-## Version
-
-**v3.2.0** — Julio 2026
-
-<!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
 This project is indexed by GitNexus as **ripowall** (541 symbols, 1143 relationships, 48 execution flows).
