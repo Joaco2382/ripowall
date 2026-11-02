@@ -70,10 +70,12 @@ desde tus aplicaciones (o con `ripowall-gui`).
 
 - **Arch Linux:** hay un `PKGBUILD` en el repositorio (`makepkg -si`) y otro para el motor de escenas con los arreglos,
   en `engine/`.
-- **Motor de escenas:** en Arch, `install.sh` construye e instala el paquete `linux-wallpaperengine-ripowall`. En otras
-  distribuciones compila el motor en `~/.local` (necesita las dependencias de compilación que lista
-  [el README de linux-wallpaperengine](https://github.com/Almamu/linux-wallpaperengine)). Sin el motor, los videos, los
-  fondos web y los presets funcionan igual; solo no se ofrecen escenas.
+- **Motor de escenas:** en Arch, `install.sh` construye e instala el paquete `linux-wallpaperengine-ripowall`
+  (escenas comprobadas). En otras distribuciones compila el motor en `~/.local` (necesita las dependencias de
+  compilación que lista [el README de linux-wallpaperengine](https://github.com/Almamu/linux-wallpaperengine)).
+  **En Ubuntu y Debian el motor compila, pero las escenas todavía no se dibujan:** sus paquetes de GLFW y GLEW vienen
+  solo para X11 (`libglfw3-wayland` arregla GLFW; GLEW está pendiente). Sin el motor, los videos, los fondos web y los
+  presets funcionan igual; solo no se ofrecen escenas.
 
 ## Uso
 
@@ -90,6 +92,7 @@ desde tus aplicaciones (o con `ripowall-gui`).
 
 ## Limitaciones conocidas
 
+- Las escenas están comprobadas en sistemas basados en Arch; en Ubuntu/Debian todavía no se dibujan (ver Instalación).
 - 4 de las 204 escenas probadas todavía se ven distintas de su vista previa: le faltan funciones al motor (partículas
   hijas, la acumulación de `motionblur` y una niebla de partículas). Detalle en [`engine/README.md`](engine/README.md).
 - Los fondos web con visualizador de audio se ven, pero sus barras todavía no se mueven: no se les entrega el audio
