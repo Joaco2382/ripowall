@@ -19,7 +19,7 @@ T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/config" "$T/data" "$T/cache"
 
-XDG_CONFIG_HOME="$T/config" XDG_DATA_HOME="$T/data" XDG_CACHE_HOME="$T/cache" \
+XDG_CONFIG_HOME="$T/config" XDG_DATA_HOME="$T/data" XDG_CACHE_HOME="$T/cache" XDG_SESSION_TYPE=wayland \
 OUT="$OUT" MOTOR="$MOTOR" MOTOR_ARGS="${MOTOR_ARGS:-}" ASSETS="$ASSETS" CUADROS="$CUADROS" W="$W" H="$H" \
 dbus-run-session -- bash -c '
   set -u

@@ -67,10 +67,12 @@ Then **log out and back in** (GNOME loads new extensions at login) and open **Ri
 
 - **Arch Linux:** there is a `PKGBUILD` in the repository (`makepkg -si`) and another one for the patched scene
   engine in `engine/`.
-- **Scene engine:** on Arch, `install.sh` builds and installs the package `linux-wallpaperengine-ripowall`. On other
-  distributions it compiles the engine into `~/.local` (it needs the build dependencies listed in
-  [linux-wallpaperengine's README](https://github.com/Almamu/linux-wallpaperengine)). Without the engine, videos, web
-  wallpapers and presets still work; scenes are just not offered.
+- **Scene engine:** on Arch, `install.sh` builds and installs the package `linux-wallpaperengine-ripowall`
+  (scenes verified). On other distributions it compiles the engine into `~/.local` (it needs the build dependencies
+  listed in [linux-wallpaperengine's README](https://github.com/Almamu/linux-wallpaperengine)). **On Ubuntu and
+  Debian the engine builds, but scenes don't render yet:** their GLFW and GLEW packages are built for X11 only
+  (`libglfw3-wayland` fixes GLFW, GLEW is still pending). Without the engine, videos, web wallpapers and presets still
+  work; scenes are just not offered.
 
 ## Usage
 
@@ -87,6 +89,7 @@ Then **log out and back in** (GNOME loads new extensions at login) and open **Ri
 
 ## Known limitations
 
+- Scenes are verified on Arch-based systems; on Ubuntu/Debian they don't render yet (see Install).
 - 4 of the 204 scenes tested still render differently from their preview: features missing in the engine (child
   particles, `motionblur` accumulation, one particle fog). Details in [`engine/README.md`](engine/README.md).
 - Web wallpapers with audio visualizers show up, but their bars don't move yet: system audio is not passed to them.
